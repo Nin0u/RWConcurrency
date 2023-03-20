@@ -8,7 +8,7 @@
 
 int rl_init_library();
 
-rl_descriptor rl_open(const char *path, int oflag, ...);
+rl_descriptor rl_open(const char *path, int oflag);
 int rl_close( rl_descriptor lfd);
 
 int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck);
