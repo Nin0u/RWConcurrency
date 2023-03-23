@@ -246,6 +246,32 @@ static int rl_add(rl_lock *lock_table, int pos, struct flock *lck, owner o, int 
     return pos;
 }
 
+static int is_in_lock(rl_lock *lck, owner o)
+{
+    for(int i = 0; i < lck->nb_owners; i++)
+    {
+        owner oi = lck->lock_owners[i];
+        if(oi.des == o.des && oi.proc == o.proc) return 1;
+    }
+    return 0;
+}
+
+static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o, int state)
+{
+    rl_lock *current = lock_table + pos;
+    
+    // Si on trouve lok avec lui alors on coupe à cet endroit
+    if(current->starting_offset <= lck->l_start && state == 0 && is_in_lock(current, o))
+    {
+        state = 1;
+        //On doit add un lock avec tous les autres dedans plus court
+        if(current->starting_offset < lck->l_start)
+        {
+            
+        }
+    }
+}
+
 int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 {
     if(cmd != F_SETLK && cmd != F_SETLKW) return -1;
@@ -257,9 +283,17 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 
     //TODO: si y a des processus propriétaire de lck non vivants, on les enlèves, on clean quoi !
 
+    if(lck->l_type == F_UNLCK)
+    {
+
+
+        pthread_mutex_unlock(&lfd.f->mutex_list);
+        return 0;
+    }
+
     int pos = rl_find(lfd.f->lock_table, lfd.f->first, lck);
 
-    //! Si ce n'est pas un F_UNLK
+    //! Si ce n'est pas un F_UNLCK
     // Si n'est pas dans les lck, on l'ajoute
     if(pos == -2)
     {
@@ -299,9 +333,11 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                 // si y a d autre gens on stop 
                 // sinon on change
             // Si il le change pour un WRITE --->
-                //
+                // si y a d autre gens on peut PAS pour moi ! (PAS d apres le sujet)
+                // sinon on change
 
     }
 
     pthread_mutex_unlock(&lfd.f->mutex_list);
+    return 0;
 }
