@@ -166,5 +166,142 @@ int rl_close( rl_descriptor lfd)
 
     pthread_mutex_unlock(&lfd.f->mutex_list);
 
+    //TODO: Pour le SETLKW -> réveiller les gens bloquer par la cond !
     return 0;
+}
+
+static int rl_find(rl_lock *lock_table, int pos, struct flock *lck)
+{
+    rl_lock *current = lock_table + pos;
+    if(current->len == lck->l_len && current->starting_offset == lck->l_start) return pos;
+    if((lock_table + pos)->next_lock == -1 || lck->l_start > current->starting_offset) return -2;
+    return rl_find(lock_table, current->next_lock, lck);
+}
+
+static int add_pos(rl_lock *lock_table, int pos, struct flock *lck, owner o)
+{
+    int i = 0;
+    for(i = 0; i < NB_LOCKS; i++)
+        if(lock_table[i].next_lock == -2) break;
+    if(i == NB_LOCKS) return -2;
+
+    lock_table[i].len = lck->l_len;
+    lock_table[i].lock_owners[0] = o;
+    lock_table[i].starting_offset = lck->l_start;
+    lock_table[i].type = lck->l_type;
+    lock_table[i].next_lock = pos;
+    return i;
+}
+
+// -2 -> no place
+// -3 -> overlap
+// len indique jusqu'où va le précédent lock
+// prev_type indique le type du précédent lock (write or read)
+static int rl_add(rl_lock *lock_table, int pos, struct flock *lck, owner o, int len, short prev_type)
+{
+    // Si overlap par la gauche
+    //! normalement le strict est bon, mais à vérifier
+    if(lck->l_start < len)
+    {
+        // Si un des 2 est un write on quitte !
+        if(prev_type == F_WRLCK) return -3;
+        if(lck->l_type == F_WRLCK) return -3;
+    }
+
+    rl_lock *current = lock_table + pos;
+
+    // On essaie de add le lock
+    if(lck->l_start <= current->starting_offset)
+    {
+
+        //Si overlap par la droite
+        if((lck->l_len == 0) || (lck->l_start + lck->l_len > current->starting_offset))
+        {
+            if(lck->l_type == F_WRLCK) return -3;
+            if(current->next_lock == F_WRLCK) return -3;
+        }
+
+        // -2 si pas de place
+        return add_pos(lock_table, pos, lck, o);
+    }
+
+    // Pour l'ajout à la fin
+    if(current->next_lock == -1)
+    {
+        // Overlap
+        if(current->len == 0 || current->len + current->starting_offset > lck->l_start)
+        {
+            if(current->type == F_WRLCK) return -3;
+            if(lck->l_type == F_WRLCK) return -3;
+        }
+
+        // -2 si pas de place
+        return add_pos(lock_table, pos, lck, o);
+    }
+
+    // On passe au prochain 
+    int next = rl_add(lock_table, current->next_lock, lck, o, current->starting_offset + (current->len == 0 ? lck->l_start + 1 : current->len), current->type);
+    if(next <= -2) return next;
+    current->next_lock = next;
+    return pos;
+}
+
+int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
+{
+    if(cmd != F_SETLK && cmd != F_SETLKW) return -1;
+    //TODO: Pour plus tard : Si F_SETLKW alors vérifier qu'on peut mettre le lck, sinon on wait sur le cond
+    
+    owner o = {.proc = getpid(), .des = lfd.d};
+
+    pthread_mutex_lock(&lfd.f->mutex_list);
+
+    //TODO: si y a des processus propriétaire de lck non vivants, on les enlèves, on clean quoi !
+
+    int pos = rl_find(lfd.f->lock_table, lfd.f->first, lck);
+
+    //! Si ce n'est pas un F_UNLK
+    // Si n'est pas dans les lck, on l'ajoute
+    if(pos == -2)
+    {
+        //Les read peuvent s'overlapper
+        //Les write - read / write - write peuvent pas
+        //! Incompréhension du sujet :
+        //!     Si La pose de verrou est possible si et seulement si aucun verrou incompatible 
+        //!     posé sur une partie du segment n’a de propriétaire différent de lfd_owner
+        //!    
+        //!     Par sur de comprendre
+        //!     Surement devoir changer ça du coup
+        pos = rl_add(lfd.f->lock_table, lfd.f->first, lck, o, 0, -1);
+        if(pos == -2)
+        {
+            printf("Overlapp\n");
+            //TODO: errno
+            pthread_mutex_unlock(&lfd.f->mutex_list);
+            return -1;
+        }
+        if(pos == -3)
+        {
+            printf("No Place\n");
+            //TODO: errno
+            pthread_mutex_unlock(&lfd.f->mutex_list);
+            return -1;
+        }
+        lfd.f->first = pos;
+    } else {
+        // TODO: COMPLIQUE
+        //Si il n est pas proprietaire dans le verrou
+            // Si il est de meme type on l'ajoute
+            // Sinon on refuse....
+        
+        //Si il est propriétaire
+            // Si c'est le meme -> rien à faire
+            // Si il le change pour un READ ---> 
+                // si y a d autre gens on stop 
+                // sinon on change
+            // Si il le change pour un WRITE --->
+                //
+
+    }
+
+    pthread_mutex_unlock(&lfd.f->mutex_list);
 }
