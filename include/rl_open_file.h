@@ -13,6 +13,8 @@ typedef struct rl_open_file
 {
     int first;
     rl_lock lock_table[NB_LOCKS];
+
+    pthread_mutex_t mutex_list; //Utiliser lorsqu'on modifie la liste !
 } rl_open_file;
 
 
