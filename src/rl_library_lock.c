@@ -116,6 +116,24 @@ rl_descriptor rl_open(const char *path, int oflag)
     return des;
 }
 
+static void remove_owner_in_lock(rl_lock *lock_table, int pos, owner o)
+{
+    for(int i = 0; i < (lock_table + pos)->nb_owners; i++)
+    {
+        owner oi = (lock_table + pos)->lock_owners[i];
+        if((oi.des == o.des) && (oi.proc == o.proc))
+        {
+            // On shift tous ceux de droite de un cran vers la droite
+            for(int j = i + 1; j < (lock_table + pos)->nb_owners - 1; j++)
+            {
+                (lock_table + pos)->lock_owners[j] = (lock_table + pos)->lock_owners[j + 1];
+            }
+        }
+        (lock_table + pos)->nb_owners--;
+        break;
+    }
+}
+
 static int rl_remove_owner(rl_lock *lock_table, int pos, owner o)
 {
     // On supprime de la table !
@@ -193,54 +211,103 @@ static int add_pos(rl_lock *lock_table, int pos, struct flock *lck, owner o)
     return i;
 }
 
+
+//! Peut être ne regarder que les write qui sont différent de o
+static int get_min_start_write(rl_lock *lock_table, int pos, owner o)
+{
+    rl_lock *current = lock_table + pos;
+    if(current->next_lock == -1 && current->type == F_WRLCK) return current->starting_offset;
+    if(current->type == F_WRLCK) return current->starting_offset;
+    if(current->next_lock == -1) return -1;
+    int next_min = get_min_start_write(lock_table, current->next_lock, o);
+    return next_min;
+}
+
+
 // -2 -> no place
 // -3 -> overlap
-// len indique jusqu'où va le précédent lock
-// prev_type indique le type du précédent lock (write or read)
-static int rl_add(rl_lock *lock_table, int pos, struct flock *lck, owner o, int len, short prev_type)
+// max_wrlen indique le max de la borne gauche d'un lock write (pour les read seule les write nous embetent)
+//! lors de la vérification de l'overlap, surement qu'il faut aussi vérifier si y a le owner ou pas
+//! Si y a le owner, on s'en fout de l'overlap et sinon faut faire gaffe
+static int rl_add_readlck(rl_lock *lock_table, int pos, struct flock *lck, owner o, int max_wrlen)
 {
-    // Si overlap par la gauche
-    //! normalement le strict est bon, mais à vérifier
-    if(lck->l_start < len)
-    {
-        // Si un des 2 est un write on quitte !
-        if(prev_type == F_WRLCK) return -3;
-        if(lck->l_type == F_WRLCK) return -3;
-    }
+
+    //Overlap par le gauche !
+    if(max_wrlen > lck->l_start) return -3;
 
     rl_lock *current = lock_table + pos;
 
-    // On essaie de add le lock
     if(lck->l_start <= current->starting_offset)
     {
-
-        //Si overlap par la droite
-        if((lck->l_len == 0) || (lck->l_start + lck->l_len > current->starting_offset))
-        {
-            if(lck->l_type == F_WRLCK) return -3;
-            if(current->next_lock == F_WRLCK) return -3;
-        }
+        int min_wrstart = get_min_start_write(lock_table, pos, o);
+        if(min_wrstart != -1 && lck->l_len == 0) return -3;
+        if(min_wrstart != -1 && min_wrstart < lck->l_start + lck->l_len) return -3;
 
         // -2 si pas de place
         return add_pos(lock_table, pos, lck, o);
-    }
+    }    
 
-    // Pour l'ajout à la fin
+    // Ajout à la fin !
     if(current->next_lock == -1)
     {
-        // Overlap
-        if(current->len == 0 || current->len + current->starting_offset > lck->l_start)
-        {
-            if(current->type == F_WRLCK) return -3;
-            if(lck->l_type == F_WRLCK) return -3;
-        }
+        //Si overlap
+        if(current->type == F_WRLCK && (current->len == 0 || current->len + current->starting_offset > lck->l_start))
+            return -3;
+        
+        current->next_lock = add_pos(lock_table, -1, lck, o);
+        return current->next_lock;
+    }
+
+    // Sinon on passe au prochain lck
+    if(current->len == 0 && current->type == F_WRLCK)
+        max_wrlen = lck->l_start + 1; //On créera l'overlap pour la prochain étape
+    else if(current->type == F_WRLCK && max_wrlen < current->starting_offset + current->len)
+        max_wrlen = current->starting_offset + current->len;
+
+    int next = rl_add_readlck(lock_table, current->next_lock, lck, o, max_wrlen);
+    if(next <= -2) return next;
+    current->next_lock = next;
+    return pos;
+}
+
+// -2 -> no place
+// -3 -> overlap
+// max_wrlen indique le max de la borne gauche d'un lock write (pour les read seule les write nous embetent)
+static int rl_add_writelck(rl_lock *lock_table, int pos, struct flock *lck, owner o, int max_len)
+{
+
+    //Overlap par le gauche !
+    if(max_len > lck->l_start) return -3;
+
+    rl_lock *current = lock_table + pos;
+
+    if(lck->l_start <= current->starting_offset)
+    {
+        if(lck->l_len == 0) return -3;
+        if(current->starting_offset < lck->l_start + lck->l_len) return -3;
 
         // -2 si pas de place
         return add_pos(lock_table, pos, lck, o);
+    }    
+
+    // Ajout à la fin !
+    if(current->next_lock == -1)
+    {
+        //Si overlap
+        if((current->len == 0 || current->len + current->starting_offset > lck->l_start))
+            return -3;
+        
+        current->next_lock = add_pos(lock_table, -1, lck, o);
+        return current->next_lock;
     }
 
-    // On passe au prochain 
-    int next = rl_add(lock_table, current->next_lock, lck, o, current->starting_offset + (current->len == 0 ? lck->l_start + 1 : current->len), current->type);
+    // Sinon on passe au prochain lck
+    if(current->len == 0)
+        max_len = lck->l_start + 1; //On créera l'overlap pour la prochain étape
+    else if(max_len < current->starting_offset + current->len)
+        max_len = current->starting_offset + current->len;
+
+    int next = rl_add_writelck(lock_table, current->next_lock, lck, o, max_len);
     if(next <= -2) return next;
     current->next_lock = next;
     return pos;
@@ -256,20 +323,82 @@ static int is_in_lock(rl_lock *lck, owner o)
     return 0;
 }
 
-static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o, int state)
+static int rl_cut(rl_lock *lock_table, rl_lock *current, int cut_pos)
 {
+    int old_len = current->len;
+    current->len = (cut_pos - current->starting_offset);
+
+    int i = 0;
+    for(i = 0; i < NB_LOCKS; i++)
+        if(lock_table[i].next_lock != -2) break;
+    if(i == NB_LOCKS) return -2;
+
+    // Création du bloc
+    lock_table[i].next_lock = current->next_lock;
+    current->next_lock = i;
+    lock_table[i].starting_offset = cut_pos;
+    lock_table[i].len = current->starting_offset + old_len - cut_pos;
+    lock_table[i].nb_owners = current->nb_owners;
+    for(int j = 0; j < current->nb_owners; i++)
+        lock_table[i].lock_owners[j] = current->lock_owners[j];
+    
+    return i;
+}
+
+static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o)
+{
+    //Si on est arrivé à la fin de la liste
+    if(pos == -1 || pos == -2) return pos;
     rl_lock *current = lock_table + pos;
     
-    // Si on trouve lok avec lui alors on coupe à cet endroit
-    if(current->starting_offset <= lck->l_start && state == 0 && is_in_lock(current, o))
+    // On doit couper le milieu du bloc [**|*******]
+    if(current->starting_offset < lck->l_start && lck->l_start < current->starting_offset + current->len && is_in_lock(current, o))
     {
-        state = 1;
         //On doit add un lock avec tous les autres dedans plus court
-        if(current->starting_offset < lck->l_start)
-        {
-            
-        }
+        int r = rl_cut(lock_table, current, lck->l_start);
+        if(r == -2) return -3;
+
+        // On enlève pas de suite le owner, on le fera plus tard
+        int next = rl_unlock(lock_table, current->next_lock, lck, o);
+        if(next == -2) return -3;
+        current->next_lock = next;
+        return pos;
     }
+    
+    // Soit c'est bien aligné à gauche parce que l'utilisateur a demandé ça
+    // Soit c'est une coupe faite par le bloc du dessus
+    // Mais là y une autre coupe à faire [|******|***]
+    if(lck->l_start + lck->l_len < current->starting_offset + current->len && is_in_lock(current, o))
+    {
+        // On coupe le bloc
+        int r = rl_cut(lock_table, current, lck->l_start + lck->l_len);
+        if(r == -2) return -3;
+
+        // On enlève pas de suite le owner, on le fera plus tard
+        // On rappelle sur la current pos, pour enlever le owner et peut le bloc en question
+        return rl_unlock(lock_table, pos, lck, o);
+    }    
+
+    // Là on en enlève le owner et peut être le bloc si jamais [|*********|]
+    if(lck->l_start <= current->starting_offset && current->starting_offset + current->len <= lck->l_start + lck->l_len && is_in_lock(current, o))
+    {
+        remove_owner_in_lock(lock_table, pos, o);
+
+        int next = rl_unlock(lock_table, current->next_lock, lck, o);
+        if(next == -2) return -3;
+        current->next_lock = next;
+
+        //On elève si besoin
+        if(current->nb_owners == 0)
+            return current->next_lock;
+        return pos;
+    }
+
+    int next = rl_unlock(lock_table, current->next_lock, lck, o);
+    if(next == -2) return -3;
+    current->next_lock = next;
+    return pos;
+
 }
 
 int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
@@ -285,15 +414,14 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 
     if(lck->l_type == F_UNLCK)
     {
-
-
+        int r = rl_unlock(lfd.f->lock_table, lfd.f->first, lck, o);
         pthread_mutex_unlock(&lfd.f->mutex_list);
+        if(r == -2) return r;
         return 0;
     }
 
     int pos = rl_find(lfd.f->lock_table, lfd.f->first, lck);
 
-    //! Si ce n'est pas un F_UNLCK
     // Si n'est pas dans les lck, on l'ajoute
     if(pos == -2)
     {
@@ -305,7 +433,10 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
         //!    
         //!     Par sur de comprendre
         //!     Surement devoir changer ça du coup
-        pos = rl_add(lfd.f->lock_table, lfd.f->first, lck, o, 0, -1);
+        if(lck->l_type == F_WRLCK)
+            pos = rl_add_writelck(lfd.f->lock_table, lfd.f->first, lck, o, 0);
+        if(lck->l_type == F_RDLCK)
+            pos = rl_add_readlck(lfd.f->lock_table, lfd.f->first, lck, o, 0);
         if(pos == -2)
         {
             printf("Overlapp\n");
@@ -323,9 +454,13 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
         lfd.f->first = pos;
     } else {
         // TODO: COMPLIQUE
+        //! Promotion ne sont pas clair pour moi à demander au prof
+        printf("Pas encore fait, dsl T_T\n");
         //Si il n est pas proprietaire dans le verrou
             // Si il est de meme type on l'ajoute
             // Sinon on refuse....
+                    // Si c etait un read et qu on met un write pbm
+                    // si c etait un write et qu on met un read pbm
         
         //Si il est propriétaire
             // Si c'est le meme -> rien à faire
@@ -340,4 +475,33 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 
     pthread_mutex_unlock(&lfd.f->mutex_list);
     return 0;
+}
+
+static void rl_print_owner(owner o)
+{
+    printf("(d = %d, proc = %d) ", o.des, o.proc);
+}
+
+static void rl_print_lock(rl_lock *lck)
+{
+    printf("{start = %ld, end = %ld, type = %d ,", lck->starting_offset, lck->starting_offset + lck->len, lck->type);
+    for(int i = 0; i < lck->nb_owners; i++)
+        rl_print_owner(lck->lock_owners[i]);
+    printf("\n");
+}
+
+static void rl_print_lock_table(rl_lock *lock_table, int pos)
+{
+    if(pos == -1) return;
+    rl_print_lock(lock_table + pos);
+}
+
+void rl_print_open_file(rl_open_file *f)
+{
+    if(f->first == -2)
+    {
+        printf("VIDE\n");
+        return;
+    }
+    rl_print_lock_table(f->lock_table, f->first);
 }
