@@ -205,6 +205,7 @@ static int add_pos(rl_lock *lock_table, int pos, struct flock *lck, owner o)
 
     lock_table[i].len = lck->l_len;
     lock_table[i].lock_owners[0] = o;
+    lock_table[i].nb_owners = 1;
     lock_table[i].starting_offset = lck->l_start;
     lock_table[i].type = lck->l_type;
     lock_table[i].next_lock = pos;
@@ -254,8 +255,10 @@ static int rl_add_readlck(rl_lock *lock_table, int pos, struct flock *lck, owner
         if(current->type == F_WRLCK && (current->len == 0 || current->len + current->starting_offset > lck->l_start))
             return -3;
         
-        current->next_lock = add_pos(lock_table, -1, lck, o);
-        return current->next_lock;
+        int r = add_pos(lock_table, -1, lck, o);
+        if(r == -2) return -2;
+        current->next_lock = r;
+        return pos;
     }
 
     // Sinon on passe au prochain lck
@@ -297,8 +300,10 @@ static int rl_add_writelck(rl_lock *lock_table, int pos, struct flock *lck, owne
         if((current->len == 0 || current->len + current->starting_offset > lck->l_start))
             return -3;
         
-        current->next_lock = add_pos(lock_table, -1, lck, o);
-        return current->next_lock;
+        int r = add_pos(lock_table, -1, lck, o);
+        if(r == -2) return -2;
+        current->next_lock = r;
+        return pos;
     }
 
     // Sinon on passe au prochain lck
@@ -328,9 +333,10 @@ static int rl_cut(rl_lock *lock_table, rl_lock *current, int cut_pos)
     int old_len = current->len;
     current->len = (cut_pos - current->starting_offset);
 
+    printf("rl_cut at %d\n", cut_pos);
     int i = 0;
     for(i = 0; i < NB_LOCKS; i++)
-        if(lock_table[i].next_lock != -2) break;
+        if(lock_table[i].next_lock == -2) break;
     if(i == NB_LOCKS) return -2;
 
     // Création du bloc
@@ -339,13 +345,15 @@ static int rl_cut(rl_lock *lock_table, rl_lock *current, int cut_pos)
     lock_table[i].starting_offset = cut_pos;
     lock_table[i].len = current->starting_offset + old_len - cut_pos;
     lock_table[i].nb_owners = current->nb_owners;
-    for(int j = 0; j < current->nb_owners; i++)
+    
+    for(int j = 0; j < current->nb_owners; j++)
         lock_table[i].lock_owners[j] = current->lock_owners[j];
+    
     
     return i;
 }
 
-static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o)
+static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o, int first)
 {
     //Si on est arrivé à la fin de la liste
     if(pos == -1 || pos == -2) return pos;
@@ -359,7 +367,7 @@ static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o)
         if(r == -2) return -3;
 
         // On enlève pas de suite le owner, on le fera plus tard
-        int next = rl_unlock(lock_table, current->next_lock, lck, o);
+        int next = rl_unlock(lock_table, current->next_lock, lck, o, first);
         if(next == -2) return -3;
         current->next_lock = next;
         return pos;
@@ -368,7 +376,7 @@ static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o)
     // Soit c'est bien aligné à gauche parce que l'utilisateur a demandé ça
     // Soit c'est une coupe faite par le bloc du dessus
     // Mais là y une autre coupe à faire [|******|***]
-    if(lck->l_start + lck->l_len < current->starting_offset + current->len && is_in_lock(current, o))
+    if(current->starting_offset < lck->l_start + lck->l_len && lck->l_start + lck->l_len < current->starting_offset + current->len && is_in_lock(current, o))
     {
         // On coupe le bloc
         int r = rl_cut(lock_table, current, lck->l_start + lck->l_len);
@@ -376,7 +384,7 @@ static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o)
 
         // On enlève pas de suite le owner, on le fera plus tard
         // On rappelle sur la current pos, pour enlever le owner et peut le bloc en question
-        return rl_unlock(lock_table, pos, lck, o);
+        return rl_unlock(lock_table, pos, lck, o, first);
     }    
 
     // Là on en enlève le owner et peut être le bloc si jamais [|*********|]
@@ -384,7 +392,7 @@ static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o)
     {
         remove_owner_in_lock(lock_table, pos, o);
 
-        int next = rl_unlock(lock_table, current->next_lock, lck, o);
+        int next = rl_unlock(lock_table, current->next_lock, lck, o, first);
         if(next == -2) return -3;
         current->next_lock = next;
 
@@ -394,7 +402,7 @@ static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o)
         return pos;
     }
 
-    int next = rl_unlock(lock_table, current->next_lock, lck, o);
+    int next = rl_unlock(lock_table, current->next_lock, lck, o, first);
     if(next == -2) return -3;
     current->next_lock = next;
     return pos;
@@ -403,7 +411,7 @@ static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o)
 
 int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 {
-    if(cmd != F_SETLK && cmd != F_SETLKW) return -1;
+    if(cmd != F_SETLK && cmd != F_SETLKW && cmd != F_UNLCK) return -1;
     //TODO: Pour plus tard : Si F_SETLKW alors vérifier qu'on peut mettre le lck, sinon on wait sur le cond
     
     owner o = {.proc = getpid(), .des = lfd.d};
@@ -412,15 +420,18 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 
     //TODO: si y a des processus propriétaire de lck non vivants, on les enlèves, on clean quoi !
 
-    if(lck->l_type == F_UNLCK)
+    if(cmd == F_UNLCK)
     {
-        int r = rl_unlock(lfd.f->lock_table, lfd.f->first, lck, o);
+        printf("UNLOCK\n");
+        int r = rl_unlock(lfd.f->lock_table, lfd.f->first, lck, o, lfd.f->first);
         pthread_mutex_unlock(&lfd.f->mutex_list);
         if(r == -2) return r;
         return 0;
     }
 
-    int pos = rl_find(lfd.f->lock_table, lfd.f->first, lck);
+    int pos = -2;
+    if(lfd.f->first != -2 )
+        rl_find(lfd.f->lock_table, lfd.f->first, lck);
 
     // Si n'est pas dans les lck, on l'ajoute
     if(pos == -2)
@@ -433,18 +444,30 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
         //!    
         //!     Par sur de comprendre
         //!     Surement devoir changer ça du coup
-        if(lck->l_type == F_WRLCK)
+        if(lfd.f->first == -2)
+        {
+            pos = 0;
+            rl_lock *lock_table = lfd.f->lock_table;
+            lock_table[0].nb_owners = 1;
+            lock_table[0].len = lck->l_len;
+            lock_table[0].lock_owners[0] = o;
+            lock_table[0].starting_offset = lck->l_start;
+            lock_table[0].type = lck->l_type;
+            lock_table[0].next_lock = -1;
+        }
+        else if(lck->l_type == F_WRLCK)
             pos = rl_add_writelck(lfd.f->lock_table, lfd.f->first, lck, o, 0);
-        if(lck->l_type == F_RDLCK)
+        else if(lck->l_type == F_RDLCK)
             pos = rl_add_readlck(lfd.f->lock_table, lfd.f->first, lck, o, 0);
-        if(pos == -2)
+        
+        if(pos == -3)
         {
             printf("Overlapp\n");
             //TODO: errno
             pthread_mutex_unlock(&lfd.f->mutex_list);
             return -1;
         }
-        if(pos == -3)
+        if(pos == -2)
         {
             printf("No Place\n");
             //TODO: errno
@@ -487,13 +510,14 @@ static void rl_print_lock(rl_lock *lck)
     printf("{start = %ld, end = %ld, type = %d ,", lck->starting_offset, lck->starting_offset + lck->len, lck->type);
     for(int i = 0; i < lck->nb_owners; i++)
         rl_print_owner(lck->lock_owners[i]);
-    printf("\n");
+    printf("}\n");
 }
 
 static void rl_print_lock_table(rl_lock *lock_table, int pos)
 {
     if(pos == -1) return;
     rl_print_lock(lock_table + pos);
+    rl_print_lock_table(lock_table, (lock_table + pos)->next_lock);
 }
 
 void rl_print_open_file(rl_open_file *f)
@@ -504,4 +528,14 @@ void rl_print_open_file(rl_open_file *f)
         return;
     }
     rl_print_lock_table(f->lock_table, f->first);
+}
+
+void rl_print_lock_tab(rl_lock *lock, int first)
+{
+    if(first == -2)
+    {
+        printf("VIDE\n");
+        return;
+    }
+    rl_print_lock_table(lock, first);
 }

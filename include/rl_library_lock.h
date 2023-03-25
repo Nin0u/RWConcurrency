@@ -19,5 +19,6 @@ rl_descriptor rl_dup2( rl_descriptor lfd, int newd );
 pid_t rl_fork();
 
 void rl_print_open_file(rl_open_file *f);
+void rl_print_lock_tab(rl_lock *lock, int first);
 
 #endif
