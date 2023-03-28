@@ -3,13 +3,11 @@
 
 #include <sys/types.h>
 
-// Structure représentant un pocesseur de fichier
-
+// Structure représentant un propiétaire de fichier
 typedef struct owner
 {
     pid_t proc; // pid du processus
     int des;  // descripteur du fichier
 } owner;
-
 
 #endif

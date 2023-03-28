@@ -1,0 +1,6 @@
+# Générés par make
+obj/
+main
+
+# Généré par vscode
+.vscode/

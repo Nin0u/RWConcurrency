@@ -500,6 +500,168 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
     return 0;
 }
 
+/**
+ * Duplique un descripteur sur le plus petit descipteur non utilisé.
+ * 
+ * Parametres :
+ * - lfd : Le rl_descriptor qu'on veut dupliquer.
+ * 
+ * Retourne : un rl_descriptor. 
+ * En cas d'erreur il faut regarder la valeur du descripteur d.
+ * -1 : dup ou dup2 a échoué.
+ * -2 : Plus de place dans le tableau des propriétaires.
+ * -3 : verouillage a échoué.
+ * -4 : dévérouillage a échoué.
+*/
+rl_descriptor rl_dup(rl_descriptor lfd)
+{
+    // On commence par dupliquer le descripteur
+    int newd = dup(lfd.d);
+    if (newd < 0) goto error_dup;
+
+    printf("newd = %d\n", newd);
+    return rl_dup2(lfd, newd);
+
+// Cas d'erreurs
+error_dup:
+    rl_descriptor error = {.d = -1, .f = NULL};
+    return error;
+}
+
+/**
+ * Duplique un descripteur sur un descripteur donné.
+ * 
+ * Paramètre:
+ * - lfd : Le rl_descriptor qu'on veut dupliquer.
+ * - newd : Le nouveau descripteur de fichier.
+ * 
+ * Retourne : un rl_descriptor. En cas d'erreur il faut regarder la valeur du descripteur d.
+ * -1 : dup ou dup2 a échoué.
+ * -2 : Plus de place dans le tableau des propriétaires.
+ * -3 : Le verouillage a échoué.
+ * -4 : Le dévérouillage a échoué.
+*/
+rl_descriptor rl_dup2(rl_descriptor lfd, int newd){
+
+    // On commence par dupliquer le descripteur
+    if (dup2(lfd.d, newd) < 0) goto error_dup;
+
+    // On stocke le pid pour éviter trop d'appels à getpid
+    int pid = getpid();
+
+    // On duplique toutes les occurrences de lfd_owner comme propriétaire de verrou
+    // On le fait de manière itérative
+    rl_lock *aux = lfd.f->lock_table + lfd.f->first;
+    while (aux->next_lock != -1){
+        // On balaye tous les propriétaires des verrous du fichier en mémoire partagée
+        int limit = aux->nb_owners;
+        for (int i = 0; i < limit; i ++){
+            // si on a un propriétaire {pid, lfd.d} on ajoute {pid, newd} aux verrous
+            if (aux->lock_owners[i].des == lfd.d && aux->lock_owners[i].proc == pid){
+                owner lfd_owner = { .proc = pid, .des = newd };
+                if (aux->nb_owners == NB_OWNERS) goto error_nb_owners;
+
+                if (pthread_mutex_lock(&aux->mutex_owners) < 0) goto error_lock;
+                aux->lock_owners[aux->nb_owners] = lfd_owner;
+                aux->nb_owners ++;
+                if (pthread_mutex_unlock(&aux->mutex_owners) < 0) goto error_unlock;
+            }
+        }
+        aux = lfd.f->lock_table + aux->next_lock;
+    }
+    // On traite le dernier verrou
+    int limit = aux->nb_owners;
+    for (int i = 0; i < limit; i ++){
+        if (aux->lock_owners[i].des == lfd.d && aux->lock_owners[i].proc == pid){
+            owner lfd_owner = { .des = newd, .proc = pid };
+            if (aux->nb_owners == NB_OWNERS) goto error_nb_owners;
+
+            if (pthread_mutex_lock(&aux->mutex_owners) < 0) goto error_lock;
+            aux->lock_owners[aux->nb_owners] = lfd_owner;
+            aux->nb_owners ++;
+            if (pthread_mutex_unlock(&aux->mutex_owners) < 0) goto error_unlock;
+        }
+    }
+
+    // On retourne le nouveay rl_descriptor
+    rl_descriptor new_rl_descriptor = {.d = newd, .f = lfd.f};
+    return new_rl_descriptor;
+
+// Cas d'erreurs
+error_dup:
+    rl_descriptor error1 = {.d = -1, .f = NULL};
+    return error1;
+
+error_nb_owners:
+    rl_descriptor error2 = {.d = -2, .f = NULL};
+    return error2;
+
+error_lock :
+    rl_descriptor error3 = {.d = -3, .f = NULL};
+    return error3;
+
+error_unlock :
+    rl_descriptor error4 = {.d = -4, .f = NULL};
+    return error4;
+}
+
+/**
+ * Meme comportement que fork.
+ * 
+ * Retourne : un pid_t
+ * En cas d'erreur ce pid_t vaut :
+ * -1 : fork a échoué
+ * -2 : Plus de place dans le tableau des propriétaires.
+ * -3 : Le verouillage a échoué.
+ * -4 : Le dévérouillage a échoué.
+*/
+pid_t rl_fork(){
+    int f = fork();
+    if (f != 0) return f; // Parent ou erreur
+    else { 
+        pid_t ppid = getppid();
+        pid_t pid = getpid();
+        // On cherche dans les fichiers les verrous que le parent possède
+        for(int i = 0; i < all_file.nb_files; i++){
+            // aux est un verrou
+            rl_lock *aux = all_file.tab_open_files[i]->lock_table + all_file.tab_open_files[i]->first;
+            while(aux->next_lock != -1){
+                // On balaye tous les propriétaires du verrou
+                int limit = aux->nb_owners;
+                for (int i = 0; i < limit; i ++){
+                    // si on a un propriétaire {ppid, d} on ajoute {pid, d} aux verrous
+                    if (aux->lock_owners[i].proc == ppid){
+                        owner lfd_owner = { .proc = pid, .des = aux->lock_owners[i].des };
+                        if (aux->nb_owners == NB_OWNERS) return -2;
+
+                        if (pthread_mutex_lock(&aux->mutex_owners) < 0) return -3;
+                        aux->lock_owners[aux->nb_owners] = lfd_owner;
+                        aux->nb_owners ++;
+                        if (pthread_mutex_unlock(&aux->mutex_owners) < 0) return -4;
+                    }
+                }
+                aux = all_file.tab_open_files[i]->lock_table + aux->next_lock;
+            }
+
+            // On traite le dernier verrou
+            int limit = aux->nb_owners;
+            for (int i = 0; i < limit; i ++){
+                if (aux->lock_owners[i].proc == ppid){
+                    owner lfd_owner = { .proc = pid, .des = aux->lock_owners[i].des };
+                    if (aux->nb_owners == NB_OWNERS) return -2;
+
+                    if (pthread_mutex_lock(&aux->mutex_owners) < 0) return -3;
+                    aux->lock_owners[aux->nb_owners] = lfd_owner;
+                    aux->nb_owners ++;
+                    if (pthread_mutex_unlock(&aux->mutex_owners) < 0) return -4;
+                }
+            }
+        }
+
+        return 0;
+    }
+}
+
 static void rl_print_owner(owner o)
 {
     printf("(d = %d, proc = %d) ", o.des, o.proc);
@@ -527,7 +689,7 @@ void rl_print_open_file(rl_open_file *f)
         printf("VIDE\n");
         return;
     }
-    rl_print_lock_table(f->lock_table, f->first);
+    rl_print_lock_tab(f->lock_table, f->first);
 }
 
 void rl_print_lock_tab(rl_lock *lock, int first)

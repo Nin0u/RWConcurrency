@@ -11,7 +11,7 @@
 typedef struct rl_all_file
 {
     int nb_files;
-    rl_open_file *tab_open_files[256];
+    rl_open_file *tab_open_files[NB_FILES];
 } rl_all_file;
 
 

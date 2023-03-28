@@ -7,7 +7,6 @@ int main(void)
     printf("Hello World\n");
 
     rl_descriptor desc = rl_open("test.txt", O_CREAT | O_RDWR);
-    rl_print_open_file(desc.f);
 
     struct flock f;
     f.l_start = 0;
@@ -28,11 +27,25 @@ int main(void)
 
     rl_fcntl(desc, F_UNLCK, &f);
 
+    printf("\n======= TEST DUP =======\n");
+    printf("---- Avant dup ----\n");
+    rl_print_open_file(desc.f);
+    rl_descriptor d = rl_dup(desc);
+    printf("---- Après dup ----\n");
+    rl_print_open_file(d.f);
+    rl_descriptor d2 = rl_dup2(desc,10);
+    printf("---- Apres dup2 sur 10 ----\n");
+    rl_print_open_file(d2.f);
+    printf("========================\n");
+
+    printf("\n======= TEST FORK =======\n");
+    if(rl_fork() == 0) {
+        rl_print_open_file(d2.f);
+        printf("=========================\n\n");
+    }
+
     rl_print_open_file(desc.f);
     rl_close(desc);
-
-    rl_print_open_file(desc.f);
-
 
     return 0;
 }

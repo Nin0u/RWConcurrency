@@ -7,8 +7,8 @@
 
 typedef struct rl_descriptor
 {
-    int d;
-    rl_open_file *f;
+    int d; // Descripteur ede fichier
+    rl_open_file *f; // Pointeur vers la mémoire partagée
 } rl_descriptor;
 
 #endif

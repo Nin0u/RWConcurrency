@@ -19,7 +19,7 @@ typedef struct rl_lock
     size_t nb_owners; //nb de owners
     owner lock_owners[NB_OWNERS];
 
-   // pthread_mutex_t mutex_owners; // Utilser lorsqu'on modifie le lock_owners et nb_owners !
+    pthread_mutex_t mutex_owners; // Utilser lorsqu'on modifie le lock_owners et nb_owners !
 } rl_lock;
 
 
