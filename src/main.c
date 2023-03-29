@@ -39,13 +39,29 @@ int main(void)
     printf("========================\n");
 
     printf("\n======= TEST FORK =======\n");
-    if(rl_fork() == 0) {
-        rl_print_open_file(d2.f);
-        printf("=========================\n\n");
+    switch(rl_fork()) {
+        case 0 :
+            rl_print_open_file(desc.f);
+            printf("=========================\n\n");
+            break;
+        case -2:
+            printf("limite de nb_owners atteinte\n");
+            break;
+        case -3:
+            printf("lock error\n");
+            break;
+        case -4:
+            printf("unlock error\n");
+            break;
+        default :
+            printf("Retour du parent\n");
+            break;
     }
 
     rl_print_open_file(desc.f);
-    rl_close(desc);
+    rl_close(d2);
+    rl_close(d);
+    rl_print_open_file(desc.f);
 
     return 0;
 }
