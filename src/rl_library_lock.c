@@ -176,6 +176,7 @@ int rl_close( rl_descriptor lfd)
     //Comme on vérouille la liste, pas besoin de vérouiller lors du parcours des owners des locks
     pthread_mutex_lock(&lfd.f->mutex_list);
 
+    printf("LOCKED CLOSE\n");
     owner o = {.proc = getpid(), .des = lfd.d};
     lfd.f->first = rl_remove_owner(lfd.f->lock_table, lfd.f->first, o);
 
@@ -356,9 +357,10 @@ static int rl_cut(rl_lock *lock_table, rl_lock *current, int cut_pos)
 static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o, int first)
 {
     //Si on est arrivé à la fin de la liste
+    printf("%d\n", pos);
     if(pos == -1 || pos == -2) return pos;
     rl_lock *current = lock_table + pos;
-    
+
     // On doit couper le milieu du bloc [**|*******]
     if(current->starting_offset < lck->l_start && lck->l_start < current->starting_offset + current->len && is_in_lock(current, o))
     {
@@ -368,7 +370,7 @@ static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o, i
 
         // On enlève pas de suite le owner, on le fera plus tard
         int next = rl_unlock(lock_table, current->next_lock, lck, o, first);
-        if(next == -2) return -3;
+        if(next == -2 || next == -3) return -3;
         current->next_lock = next;
         return pos;
     }
@@ -393,17 +395,20 @@ static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o, i
         remove_owner_in_lock(lock_table, pos, o);
 
         int next = rl_unlock(lock_table, current->next_lock, lck, o, first);
-        if(next == -2) return -3;
+        if(next == -2 || next == -3) return -3;
         current->next_lock = next;
 
         //On elève si besoin
-        if(current->nb_owners == 0)
-            return current->next_lock;
+        if(current->nb_owners == 0){
+            int rep = current->next_lock;
+            current->next_lock = -2;
+            return rep;
+        }
         return pos;
     }
 
     int next = rl_unlock(lock_table, current->next_lock, lck, o, first);
-    if(next == -2) return -3;
+    if(next == -2 || next == -3) return -3;
     current->next_lock = next;
     return pos;
 
@@ -417,15 +422,20 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
     owner o = {.proc = getpid(), .des = lfd.d};
 
     pthread_mutex_lock(&lfd.f->mutex_list);
-
     //TODO: si y a des processus propriétaire de lck non vivants, on les enlèves, on clean quoi !
 
     if(cmd == F_UNLCK)
     {
         printf("UNLOCK\n");
         int r = rl_unlock(lfd.f->lock_table, lfd.f->first, lck, o, lfd.f->first);
+        if(r == -3) {
+            printf("IMPOSSSSSSSSSIBLE\n");
+            pthread_mutex_unlock(&lfd.f->mutex_list);
+            return r;
+        }
+        if(r == -1) lfd.f->first = -2;
+        else lfd.f->first = r;
         pthread_mutex_unlock(&lfd.f->mutex_list);
-        if(r == -2) return r;
         return 0;
     }
 
@@ -522,6 +532,9 @@ rl_descriptor rl_dup(rl_descriptor lfd)
     // On stocke le pid pour éviter trop d'appels à getpid
     int pid = getpid();
 
+    rl_descriptor new_rl_descriptor = {.d = newd, .f = lfd.f};
+    if(lfd.f->first == -2) return new_rl_descriptor;
+
     // On duplique toutes les occurrences de lfd_owner comme propriétaire de verrou
     // On le fait de manière itérative
     rl_lock *aux = lfd.f->lock_table + lfd.f->first;
@@ -558,7 +571,6 @@ rl_descriptor rl_dup(rl_descriptor lfd)
     if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock;
 
     // On retourne le nouveay rl_descriptor
-    rl_descriptor new_rl_descriptor = {.d = newd, .f = lfd.f};
     return new_rl_descriptor;
 
 // Cas d'erreurs
@@ -600,12 +612,14 @@ rl_descriptor rl_dup2(rl_descriptor lfd, int newd){
     // On stocke le pid pour éviter trop d'appels à getpid
     int pid = getpid();
 
+    rl_descriptor new_rl_descriptor = {.d = newd, .f = lfd.f};
+
+    if(lfd.f->first == -2) return new_rl_descriptor;
     // On duplique toutes les occurrences de lfd_owner comme propriétaire de verrou
     // On le fait de manière itérative
     rl_lock *aux = lfd.f->lock_table + lfd.f->first;
 
     if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock;
-
     while (aux->next_lock != -1){
         // On balaye tous les propriétaires des verrous du fichier en mémoire partagée
         int limit = aux->nb_owners;
@@ -626,7 +640,6 @@ rl_descriptor rl_dup2(rl_descriptor lfd, int newd){
     if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock;
 
     // On retourne le nouveay rl_descriptor
-    rl_descriptor new_rl_descriptor = {.d = newd, .f = lfd.f};
     return new_rl_descriptor;
 
 // Cas d'erreurs
@@ -662,10 +675,19 @@ pid_t rl_fork(){
         // On cherche dans les fichiers les verrous que le parent possède
         for(int i = 0; i < all_file.nb_files; i++){
             pthread_mutex_t *l = &all_file.tab_open_files[i]->mutex_list;
+
             if (pthread_mutex_lock(l) < 0) return -3;
+
+
+            if(all_file.tab_open_files[i]->first == -2) 
+            {
+                if (pthread_mutex_unlock(l) < 0) return -4;
+                continue;
+            }
 
             // aux est un verrou
             rl_lock *aux = (all_file.tab_open_files[i]->lock_table) + (all_file.tab_open_files[i]->first);
+            
             while(aux->next_lock != -1){
                 // On balaye tous les propriétaires du verrou
                 int limit = aux->nb_owners;
@@ -674,6 +696,8 @@ pid_t rl_fork(){
                     if (aux->lock_owners[i].proc == ppid){
                         if (aux->nb_owners == NB_OWNERS) return -2;
                         owner lfd_owner = { .proc = pid, .des = aux->lock_owners[i].des };
+                        printf("J'ajoute : %d %d\n", pid, aux->lock_owners[i].des);
+                        
                         aux->lock_owners[aux->nb_owners] = lfd_owner;
                         aux->nb_owners ++;
                     }
@@ -687,6 +711,7 @@ pid_t rl_fork(){
                 if (aux->lock_owners[i].proc == ppid){
                     if (aux->nb_owners == NB_OWNERS) return -2;
                     owner lfd_owner = { .proc = pid, .des = aux->lock_owners[i].des };
+                    printf("J'ajoute : %d %d\n", pid, aux->lock_owners[i].des);
                     aux->lock_owners[aux->nb_owners] = lfd_owner;
                     aux->nb_owners ++;
                 }
@@ -705,7 +730,7 @@ static void rl_print_owner(owner o)
 
 static void rl_print_lock(rl_lock *lck)
 {
-    printf("{start = %ld, end = %ld, type = %d ,", lck->starting_offset, lck->starting_offset + lck->len, lck->type);
+    printf("{start = %ld, end = %ld, type = %d , next = %d", lck->starting_offset, lck->starting_offset + lck->len, lck->type, lck->next_lock);
     for(int i = 0; i < lck->nb_owners; i++)
         rl_print_owner(lck->lock_owners[i]);
     printf("}\n");
