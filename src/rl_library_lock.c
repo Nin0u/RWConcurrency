@@ -213,15 +213,30 @@ static int add_pos(rl_lock *lock_table, int pos, struct flock *lck, owner o)
     return i;
 }
 
+static int is_the_only_one(rl_lock *lck, owner o)
+{
+    return lck->nb_owners == 1 && lck->lock_owners[0].des == o.des && lck->lock_owners[0].proc == o.proc;
+}
 
-//! Peut être ne regarder que les write qui sont différent de o
+// return -1 si personne
 static int get_min_start_write(rl_lock *lock_table, int pos, owner o)
 {
     rl_lock *current = lock_table + pos;
-    if(current->next_lock == -1 && current->type == F_WRLCK) return current->starting_offset;
-    if(current->type == F_WRLCK) return current->starting_offset;
+    if(current->next_lock == -1 && current->type == F_WRLCK && !is_the_only_one(current, o)) return current->starting_offset;
+    if(current->type == F_WRLCK && !is_the_only_one(current, o)) return current->starting_offset;
     if(current->next_lock == -1) return -1;
     int next_min = get_min_start_write(lock_table, current->next_lock, o);
+    return next_min;
+}
+
+// return -1 si personne
+static int get_min_start(rl_lock *lock_table, int pos, owner o)
+{
+    rl_lock *current = lock_table + pos;
+    if(current->next_lock == -1 && !is_the_only_one(current, o)) return current->starting_offset;
+    if(!is_the_only_one(current, o)) return current->starting_offset;
+    if(current->next_lock == -1) return -1;
+    int next_min = get_min_start(lock_table, current->next_lock, o);
     return next_min;
 }
 
@@ -229,8 +244,6 @@ static int get_min_start_write(rl_lock *lock_table, int pos, owner o)
 // -2 -> no place
 // -3 -> overlap
 // max_wrlen indique le max de la borne gauche d'un lock write (pour les read seule les write nous embetent)
-//! lors de la vérification de l'overlap, surement qu'il faut aussi vérifier si y a le owner ou pas
-//! Si y a le owner, on s'en fout de l'overlap et sinon faut faire gaffe
 static int rl_add_readlck(rl_lock *lock_table, int pos, struct flock *lck, owner o, int max_wrlen)
 {
 
@@ -253,7 +266,7 @@ static int rl_add_readlck(rl_lock *lock_table, int pos, struct flock *lck, owner
     if(current->next_lock == -1)
     {
         //Si overlap
-        if(current->type == F_WRLCK && (current->len == 0 || current->len + current->starting_offset > lck->l_start))
+        if(current->type == F_WRLCK && (current->len == 0 || current->len + current->starting_offset > lck->l_start) && !is_the_only_one(current, o))
             return -3;
         
         int r = add_pos(lock_table, -1, lck, o);
@@ -263,9 +276,9 @@ static int rl_add_readlck(rl_lock *lock_table, int pos, struct flock *lck, owner
     }
 
     // Sinon on passe au prochain lck
-    if(current->len == 0 && current->type == F_WRLCK)
-        max_wrlen = lck->l_start + 1; //On créera l'overlap pour la prochain étape
-    else if(current->type == F_WRLCK && max_wrlen < current->starting_offset + current->len)
+    if(current->len == 0 && current->type == F_WRLCK && !is_the_only_one(current, o))
+        max_wrlen = lck->l_start + 1;
+    else if(current->type == F_WRLCK && max_wrlen < current->starting_offset + current->len && !is_the_only_one(current, o))
         max_wrlen = current->starting_offset + current->len;
 
     int next = rl_add_readlck(lock_table, current->next_lock, lck, o, max_wrlen);
@@ -279,7 +292,7 @@ static int rl_add_readlck(rl_lock *lock_table, int pos, struct flock *lck, owner
 // max_wrlen indique le max de la borne gauche d'un lock write (pour les read seule les write nous embetent)
 static int rl_add_writelck(rl_lock *lock_table, int pos, struct flock *lck, owner o, int max_len)
 {
-
+    printf("MAXLEN : %d\n", max_len);
     //Overlap par le gauche !
     if(max_len > lck->l_start) return -3;
 
@@ -287,8 +300,10 @@ static int rl_add_writelck(rl_lock *lock_table, int pos, struct flock *lck, owne
 
     if(lck->l_start <= current->starting_offset)
     {
-        if(lck->l_len == 0) return -3;
-        if(current->starting_offset < lck->l_start + lck->l_len) return -3;
+
+        int min_rstart = get_min_start(lock_table, pos, o);
+        if(min_rstart != -1 && lck->l_len == 0) return -3;
+        if(min_rstart != -1 && min_rstart < lck->l_start + lck->l_len) return -3;
 
         // -2 si pas de place
         return add_pos(lock_table, pos, lck, o);
@@ -308,9 +323,9 @@ static int rl_add_writelck(rl_lock *lock_table, int pos, struct flock *lck, owne
     }
 
     // Sinon on passe au prochain lck
-    if(current->len == 0)
+    if(current->len == 0 && !is_the_only_one(current, o))
         max_len = lck->l_start + 1; //On créera l'overlap pour la prochain étape
-    else if(max_len < current->starting_offset + current->len)
+    else if(max_len < current->starting_offset + current->len && !is_the_only_one(current, o))
         max_len = current->starting_offset + current->len;
 
     int next = rl_add_writelck(lock_table, current->next_lock, lck, o, max_len);
@@ -328,6 +343,7 @@ static int is_in_lock(rl_lock *lck, owner o)
     }
     return 0;
 }
+
 
 static int rl_cut(rl_lock *lock_table, rl_lock *current, int cut_pos)
 {
@@ -414,6 +430,44 @@ static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o, i
 
 }
 
+static int rl_add_lock(rl_descriptor lfd, int cmd, struct flock *lck)
+{
+    //Les read peuvent s'overlapper
+    //Les write - read / write - write peuvent pas
+    owner o = {.proc = getpid(), .des = lfd.d};
+    int pos = -2;
+    if(lfd.f->first == -2)
+    {
+        pos = 0;
+        rl_lock *lock_table = lfd.f->lock_table;
+        lock_table[0].nb_owners = 1;
+        lock_table[0].len = lck->l_len;
+        lock_table[0].lock_owners[0] = o;
+        lock_table[0].starting_offset = lck->l_start;
+        lock_table[0].type = lck->l_type;
+        lock_table[0].next_lock = -1;
+    }
+    else if(lck->l_type == F_WRLCK)
+        pos = rl_add_writelck(lfd.f->lock_table, lfd.f->first, lck, o, 0);
+    else if(lck->l_type == F_RDLCK)
+        pos = rl_add_readlck(lfd.f->lock_table, lfd.f->first, lck, o, 0);
+    
+    if(pos == -3)
+    {
+        printf("Overlapp\n");
+        //TODO: errno
+        return -1;
+    }
+    if(pos == -2)
+    {
+        printf("No Place\n");
+        //TODO: errno
+        return -1;
+    }
+    lfd.f->first = pos;
+    return 0;
+}
+
 int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 {
     if(cmd != F_SETLK && cmd != F_SETLKW && cmd != F_UNLCK) return -1;
@@ -445,65 +499,15 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 
     // Si n'est pas dans les lck, on l'ajoute
     if(pos == -2)
-    {
-        //Les read peuvent s'overlapper
-        //Les write - read / write - write peuvent pas
-        //! Incompréhension du sujet :
-        //!     Si La pose de verrou est possible si et seulement si aucun verrou incompatible 
-        //!     posé sur une partie du segment n’a de propriétaire différent de lfd_owner
-        //!    
-        //!     Par sur de comprendre
-        //!     Surement devoir changer ça du coup
-        if(lfd.f->first == -2)
-        {
-            pos = 0;
-            rl_lock *lock_table = lfd.f->lock_table;
-            lock_table[0].nb_owners = 1;
-            lock_table[0].len = lck->l_len;
-            lock_table[0].lock_owners[0] = o;
-            lock_table[0].starting_offset = lck->l_start;
-            lock_table[0].type = lck->l_type;
-            lock_table[0].next_lock = -1;
-        }
-        else if(lck->l_type == F_WRLCK)
-            pos = rl_add_writelck(lfd.f->lock_table, lfd.f->first, lck, o, 0);
-        else if(lck->l_type == F_RDLCK)
-            pos = rl_add_readlck(lfd.f->lock_table, lfd.f->first, lck, o, 0);
-        
-        if(pos == -3)
-        {
-            printf("Overlapp\n");
-            //TODO: errno
-            pthread_mutex_unlock(&lfd.f->mutex_list);
-            return -1;
-        }
-        if(pos == -2)
-        {
-            printf("No Place\n");
-            //TODO: errno
-            pthread_mutex_unlock(&lfd.f->mutex_list);
-            return -1;
-        }
-        lfd.f->first = pos;
+    {   
+        int r = rl_add_lock(lfd, cmd, lck);
+        //TODO: Suivant r bolquer ou pas !
+        pthread_mutex_unlock(&lfd.f->mutex_list);
+        return r;
     } else {
         // TODO: COMPLIQUE
-        //! Promotion ne sont pas clair pour moi à demander au prof
         printf("Pas encore fait, dsl T_T\n");
-        //Si il n est pas proprietaire dans le verrou
-            // Si il est de meme type on l'ajoute
-            // Sinon on refuse....
-                    // Si c etait un read et qu on met un write pbm
-                    // si c etait un write et qu on met un read pbm
         
-        //Si il est propriétaire
-            // Si c'est le meme -> rien à faire
-            // Si il le change pour un READ ---> 
-                // si y a d autre gens on stop 
-                // sinon on change
-            // Si il le change pour un WRITE --->
-                // si y a d autre gens on peut PAS pour moi ! (PAS d apres le sujet)
-                // sinon on change
-
     }
 
     pthread_mutex_unlock(&lfd.f->mutex_list);
