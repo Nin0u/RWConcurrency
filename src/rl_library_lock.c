@@ -241,6 +241,16 @@ static int get_min_start(rl_lock *lock_table, int pos, owner o)
 }
 
 
+static int get_max_len(rl_lock *lock_table, int pos, owner o, int l_pos)
+{
+    if(l_pos == pos) return -1;
+    rl_lock *current = lock_table + pos;
+    int max_len = get_max_len(lock_table, current->next_lock, o, l_pos);
+    if(!is_the_only_one(current, o) && current->starting_offset + current->len > max_len)
+        return current->starting_offset + current->len;
+    return max_len;
+}
+
 // -2 -> no place
 // -3 -> overlap
 // max_wrlen indique le max de la borne gauche d'un lock write (pour les read seule les write nous embetent)
@@ -468,6 +478,48 @@ static int rl_add_lock(rl_descriptor lfd, int cmd, struct flock *lck)
     return 0;
 }
 
+// -3 overlap !
+static int rl_replace_lock(rl_descriptor lfd, struct flock *lck, int pos, owner o)
+{
+    rl_lock *current = lfd.f->lock_table + pos;
+
+    //WRITE sur WRITE
+    if(lck->l_type == F_WRLCK && current->type == F_WRLCK)
+    {
+        if(is_in_lock(current, o)) return 0;
+        else return -3;
+    }
+
+    //READ sur WRITE
+    if(lck->l_type == F_RDLCK && current->type == F_WRLCK)
+    {
+        if(is_the_only_one(current, o))
+        {
+            current->type = F_RDLCK;
+            return 0;
+        } else return -3;
+    }
+
+
+    if(current->type == F_RDLCK)
+    {
+        if(lck->l_type == F_RDLCK && is_in_lock(current, o)) return 0;
+        if(lck->l_type == F_WRLCK && !is_the_only_one(current, o)) return -3;
+        int min_wr = get_min_start_write(lfd.f->lock_table, pos, o);
+        int max_wr = get_max_len(lfd.f->lock_table, lfd.f->first, o, pos);
+        if(current->starting_offset < max_wr) return -3;
+        if(min_wr != -1 && current->starting_offset + current->len > max_wr) return -3;
+        if(lck->l_type == F_RDLCK)
+        {
+            if(current->nb_owners == NB_OWNERS) return -2;
+            current->lock_owners[current->nb_owners] = o;
+            current->nb_owners++;
+        } else current->type = F_WRLCK;
+    }
+    return 0;
+
+}
+
 int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 {
     if(cmd != F_SETLK && cmd != F_SETLKW && cmd != F_UNLCK) return -1;
@@ -505,8 +557,10 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
         pthread_mutex_unlock(&lfd.f->mutex_list);
         return r;
     } else {
-        // TODO: COMPLIQUE
-        printf("Pas encore fait, dsl T_T\n");
+        // TODO: Suivant r bloquer ou pas !
+        int r = rl_replace_lock(lfd, lck, pos, o);
+        pthread_mutex_unlock(&lfd.f->mutex_list);
+        return r;
         
     }
 
