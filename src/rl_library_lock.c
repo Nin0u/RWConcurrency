@@ -832,9 +832,9 @@ pid_t rl_fork(){
             }
         }
         if (pthread_mutex_unlock(l) < 0) return -4;
-
-        return 0;
     }
+    
+    return 0;
 }
 
 static void rl_print_owner(owner o)
