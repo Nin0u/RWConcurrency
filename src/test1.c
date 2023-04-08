@@ -27,7 +27,7 @@ int main(void){
     desc = rl_open("test.txt", O_CREAT | O_RDWR);
     rl_print_open_file(desc.f);
 
-    printf("==== Ajout d'un verrou =====\n");
+    printf("==== Ajout de verrou =====\n");
     struct flock f;
     f.l_start = 5;
     f.l_type = F_WRLCK;
@@ -39,6 +39,11 @@ int main(void){
     f.l_type = F_WRLCK;
     f.l_len = 10; 
     rl_fcntl(desc, F_SETLK, &f); 
+
+    f.l_start = 10;
+    f.l_type = F_WRLCK;
+    f.l_len = 10;
+    rl_fcntl(desc, F_SETLK, &f);    
 
     rl_print_open_file(desc.f);
 
