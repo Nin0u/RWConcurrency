@@ -1,20 +1,32 @@
 #include "rl_library_lock.h"
 
-#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/stat.h>
+#include <stdarg.h>
+#include <unistd.h>
+#include <string.h>
+
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/mman.h>
-#include <errno.h>
-#include <unistd.h>
+#include <sys/stat.h>
 #include <sys/types.h>
-
 
 #define PREFIX "f"
 
+/** Variable globale statique qui contient tous nos fichiers ouverts. */
 static rl_all_file all_file;
 
+/**
+ * Initialise un mutex 
+ * 
+ * Paramètre : 
+ * - pmutex : le mutex à initialiser 
+ * 
+ * Retourne : 
+ * - 0 en cas de succès
+ * - 1 en cas d'erreur
+ */
 int initialiser_mutex(pthread_mutex_t *pmutex) {
     pthread_mutexattr_t mutexattr;
 
@@ -32,6 +44,35 @@ int initialiser_mutex(pthread_mutex_t *pmutex) {
         perror("mutex init");
         return 1;
     }
+    return 0;
+}
+
+/**
+ * Initialise une condition 
+ * 
+ * Paramètre : 
+ * - pmutex : la condition à initialiser 
+ * 
+ * Retourne : 
+ * - 0 en cas de succès
+ * - 1 en cas d'erreur
+ */
+int initialiser_cond(pthread_cond_t *pcond) {
+    pthread_condattr_t condattr;
+    if (pthread_condattr_init(&condattr) != 0){
+        perror("condattr init");
+        return 1;
+    }
+    if (pthread_condattr_setpshared( &condattr, PTHREAD_PROCESS_SHARED) != 0) {
+        perror("condattr setpshared");
+        return 1;
+    }
+
+    if (pthread_cond_init( pcond, &condattr ) != 0){
+        perror("cond init");
+        return 1;
+    }
+
     return 0;
 }
 
@@ -96,13 +137,32 @@ static rl_open_file *open_shm(const char *path)
     return file;
 }
 
-//TODO: Ajouter le ... à la signature
-// Renvoie {-1, NULL} si pbm
-rl_descriptor rl_open(const char *path, int oflag)
+/**
+ * Ouvre un fichier.
+ * 
+ * Parametres :
+ * - path : le chemin vers le fichier
+ * - oflag : mode d'ouverture
+ * Si oflag contient O_CREAT, il faut ajouter en plus les permissions dans le paramètre après.
+ * 
+ * Retourne : un rl_descriptor du fichier.
+ * En cas d'erreur retourne {-1, NULL}
+*/
+rl_descriptor rl_open(const char *path, int oflag, ...)
 {
     rl_descriptor des = {.d = -1, .f = NULL};
     if(all_file.nb_files == NB_FILES) return des;
-    int fd = open(path, oflag);
+    int fd;
+
+    if (oflag & O_CREAT) {
+        va_list mode;
+        va_start(mode, oflag);
+        int m = va_arg(mode, int);
+        fd = open(path, oflag, m);
+        va_end(mode);
+    }
+
+    else fd = open(path, oflag);
     if(fd == -1)
         perror("open");
 
@@ -524,7 +584,7 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 {
     if(cmd != F_SETLK && cmd != F_SETLKW && cmd != F_UNLCK) return -1;
     //TODO: Pour plus tard : Si F_SETLKW alors vérifier qu'on peut mettre le lck, sinon on wait sur le cond
-    
+
     owner o = {.proc = getpid(), .des = lfd.d};
 
     pthread_mutex_lock(&lfd.f->mutex_list);
@@ -532,10 +592,8 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 
     if(cmd == F_UNLCK)
     {
-        printf("UNLOCK\n");
         int r = rl_unlock(lfd.f->lock_table, lfd.f->first, lck, o, lfd.f->first);
         if(r == -3) {
-            printf("IMPOSSSSSSSSSIBLE\n");
             pthread_mutex_unlock(&lfd.f->mutex_list);
             return r;
         }
@@ -727,55 +785,53 @@ error_unlock :
 pid_t rl_fork(){
     int f = fork();
     if (f != 0) return f; // Parent ou erreur
-    else { 
-        pid_t ppid = getppid();
-        pid_t pid = getpid();
-        // On cherche dans les fichiers les verrous que le parent possède
-        for(int i = 0; i < all_file.nb_files; i++){
-            pthread_mutex_t *l = &all_file.tab_open_files[i]->mutex_list;
+    // Dans l'enfant
+    // On stocke ppid et pid
+    pid_t ppid = getppid();
+    pid_t pid = getpid();
 
-            if (pthread_mutex_lock(l) < 0) return -3;
+    // On cherche dans les fichiers les verrous que le parent possède
+    for(int i = 0; i < all_file.nb_files; i++){
+        pthread_mutex_t *l = &all_file.tab_open_files[i]->mutex_list;
+        if (pthread_mutex_lock(l) < 0) return -3;
 
+        if(all_file.tab_open_files[i]->first == -2) 
+        {
+            if (pthread_mutex_unlock(l) < 0) return -4;
+            continue;
+        }
 
-            if(all_file.tab_open_files[i]->first == -2) 
-            {
-                if (pthread_mutex_unlock(l) < 0) return -4;
-                continue;
-            }
-
-            // aux est un verrou
-            rl_lock *aux = (all_file.tab_open_files[i]->lock_table) + (all_file.tab_open_files[i]->first);
-            
-            while(aux->next_lock != -1){
-                // On balaye tous les propriétaires du verrou
-                int limit = aux->nb_owners;
-                for (int i = 0; i < limit; i ++){
-                    // si on a un propriétaire {ppid, d} on ajoute {pid, d} aux verrous
-                    if (aux->lock_owners[i].proc == ppid){
-                        if (aux->nb_owners == NB_OWNERS) return -2;
-                        owner lfd_owner = { .proc = pid, .des = aux->lock_owners[i].des };
-                        printf("J'ajoute : %d %d\n", pid, aux->lock_owners[i].des);
-                        
-                        aux->lock_owners[aux->nb_owners] = lfd_owner;
-                        aux->nb_owners ++;
-                    }
-                }
-                aux = all_file.tab_open_files[i]->lock_table + aux->next_lock;
-            }
-
-            // On traite le dernier verrou
+        // aux est un verrou
+        rl_lock *aux = (all_file.tab_open_files[i]->lock_table) + (all_file.tab_open_files[i]->first);
+        
+        while(aux->next_lock != -1){
+            // On balaye tous les propriétaires du verrou
             int limit = aux->nb_owners;
             for (int i = 0; i < limit; i ++){
+                // si on a un propriétaire {ppid, d} on ajoute {pid, d} aux verrous
                 if (aux->lock_owners[i].proc == ppid){
                     if (aux->nb_owners == NB_OWNERS) return -2;
                     owner lfd_owner = { .proc = pid, .des = aux->lock_owners[i].des };
-                    printf("J'ajoute : %d %d\n", pid, aux->lock_owners[i].des);
+                    
                     aux->lock_owners[aux->nb_owners] = lfd_owner;
                     aux->nb_owners ++;
                 }
             }
-            if (pthread_mutex_unlock(l) < 0) return -4;
+            aux = all_file.tab_open_files[i]->lock_table + aux->next_lock;
         }
+
+        // On traite le dernier verrou
+        int limit = aux->nb_owners;
+        for (int i = 0; i < limit; i ++){
+            if (aux->lock_owners[i].proc == ppid){
+                if (aux->nb_owners == NB_OWNERS) return -2;
+                owner lfd_owner = { .proc = pid, .des = aux->lock_owners[i].des };
+                
+                aux->lock_owners[aux->nb_owners] = lfd_owner;
+                aux->nb_owners ++;
+            }
+        }
+        if (pthread_mutex_unlock(l) < 0) return -4;
 
         return 0;
     }
