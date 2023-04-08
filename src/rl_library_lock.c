@@ -79,7 +79,7 @@ int initialiser_cond(pthread_cond_t *pcond) {
 
 int rl_init_library()
 {
-    // Je sais pas trop pour le moment;
+    // ! Je sais pas trop pour le moment;
     all_file.nb_files = 0;
     return 0;
 }
@@ -102,7 +102,7 @@ static rl_open_file *open_shm(const char *path)
 
     int first = 0;
 
-    //Le shm n'existe pas
+    // Le shm n'existe pas
     if(fd == -1 && errno == ENOENT)
     {
         //On le créer
@@ -117,7 +117,7 @@ static rl_open_file *open_shm(const char *path)
         first = 1;
     }
 
-    //On lit la mémoire partagée
+    // On lit la mémoire partagée
     rl_open_file *file = mmap(0, sizeof(rl_open_file), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if(file == MAP_FAILED)
     {
@@ -367,7 +367,6 @@ static int rl_add_readlck(rl_lock *lock_table, int pos, struct flock *lck, owner
 // max_wrlen indique le max de la borne gauche d'un lock write (pour les read seule les write nous embetent)
 static int rl_add_writelck(rl_lock *lock_table, int pos, struct flock *lck, owner o, int max_len)
 {
-    printf("MAXLEN : %d\n", max_len);
     //Overlap par le gauche !
     if(max_len > lck->l_start) return -3;
 
@@ -602,9 +601,9 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
             // On balaye tous les propriétaires des verrous du fichier en mémoire partagée
             int limit = aux->nb_owners;
             for (int i = 0; i < limit; i ++){
-                // On vérifie si le processus propriétaire existe
+                // On vérifie si le processus propriétaire existe, s'il n'existe pas on retire ses verrous
                 if (kill(aux->lock_owners[i].proc, 0) == -1 && errno == ESRCH)
-                    rl_remove_owner(aux, i, aux->lock_owners[i]);
+                    remove_owner_in_lock(aux, i, aux->lock_owners[i]);
             }
             aux = lfd.f->lock_table + aux->next_lock;
         }
@@ -612,7 +611,7 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
         int limit = aux->nb_owners;
         for (int i = 0; i < limit; i ++){
              if (kill(aux->lock_owners[i].proc, 0) == -1 && errno == ESRCH)
-                rl_remove_owner(aux, i, aux->lock_owners[i]);
+                remove_owner_in_lock(aux, i, aux->lock_owners[i]);
         }
 
         if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock1;
@@ -620,7 +619,7 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 
     if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock2;
 
-    if(cmd == F_UNLCK)
+    if(lck->l_type == F_UNLCK)
     {
         int r = rl_unlock(lfd.f->lock_table, lfd.f->first, lck, o, lfd.f->first);
         if(r == -3) {
@@ -630,6 +629,9 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
         if(r == -1) lfd.f->first = -2;
         else lfd.f->first = r;
         pthread_mutex_unlock(&lfd.f->mutex_list);
+
+        pthread_cond_signal(&lfd.f->cond_list);
+        
         return 0;
     }
 
@@ -644,8 +646,9 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
         int r = rl_add_lock(lfd, cmd, lck);
         while(cmd == F_SETLKW && (r == -2 || r == -3)) {
             pthread_cond_wait(&lfd.f->cond_list, &lfd.f->mutex_list);
+            r = rl_add_lock(lfd, cmd, lck);
         }
-        if (cmd == F_SETLKW && (r != 2) && (r != -3)) r = rl_add_lock(lfd, cmd, lck);
+
         if(pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock2;
 
         return r;
@@ -656,8 +659,9 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
         int r = rl_replace_lock(lfd, lck, pos, o);
         while(cmd == F_SETLKW && (r == -2 || r == -3)) {
             pthread_cond_wait(&lfd.f->cond_list, &lfd.f->mutex_list);
+            r = rl_add_lock(lfd, cmd, lck);
         }
-        if (cmd == F_SETLKW && (r != 2) && (r != -3)) r = rl_replace_lock(lfd, lck, pos, o);
+
         if(pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock2;
 
         return r;

@@ -8,9 +8,14 @@ int main(void)
 {
     printf("Hello World\n");
 
+    printf("======= ETAT INITIAL =======\n");
     rl_descriptor desc = rl_open("test.txt", O_CREAT | O_RDWR);
-
     rl_print_open_file(desc.f);
+    printf("============================\n");
+
+    printf("\n====== AJOUT DE 3 VERROUS ======\n");
+    
+    printf("(WRLCK de 0 à 10) ");
     struct flock f;
     f.l_start = 0;
     f.l_type = F_WRLCK;
@@ -18,22 +23,28 @@ int main(void)
     f.l_len = 10;
     rl_fcntl(desc, F_SETLK, &f);
 
+    printf("(WRLCK de 10 à 20) ");
     f.l_start = 10;
     f.l_type = F_WRLCK;
     f.l_len = 10;
     rl_fcntl(desc, F_SETLK, &f);    
 
+    printf("(WRLCK de 5 à 15)\n");
     f.l_start = 5;
     f.l_len = 10;
     f.l_type = F_WRLCK;
     rl_fcntl(desc, F_SETLK, &f);
 
+    printf("---- Resultat ----\n");
     rl_print_open_file(desc.f);
 
-
-    rl_fcntl(desc, F_UNLCK, &f);
+    printf("\n---- Dévérouillage de (5,15) ---- \n");
+    f.l_type = F_UNLCK;
+    rl_fcntl(desc, F_SETLK, &f);
 
     rl_print_open_file(desc.f);
+
+    printf("============================\n");
 
 
     printf("\n======= TEST DUP =======\n");
@@ -51,7 +62,6 @@ int main(void)
     switch(rl_fork()) {
         case 0 :
             rl_print_open_file(desc.f);
-            printf("=========================\n\n");
             break;
         case -2:
             printf("limite de nb_owners atteinte\n");
@@ -66,14 +76,18 @@ int main(void)
             printf("Retour du parent\n");
             break;
     }
+    printf("=========================\n\n");
 
-    
+    printf("\n======= TEST CLOSE =======\n");
+    printf("---- Avant close ----\n");
     rl_print_open_file(desc.f);
     wait(NULL);
 
     rl_close(d2);
     rl_close(d);
     rl_close(desc);
+
+    printf("---- Apres close ----\n");
     rl_print_open_file(desc.f);
 
     return 0;
