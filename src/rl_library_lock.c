@@ -432,6 +432,7 @@ static int rl_cut(rl_lock *lock_table, rl_lock *current, int cut_pos)
 
     // Création du bloc
     lock_table[i].next_lock = current->next_lock;
+    lock_table[i].type = current->type;
     current->next_lock = i;
     lock_table[i].starting_offset = cut_pos;
     lock_table[i].len = current->starting_offset + old_len - cut_pos;
