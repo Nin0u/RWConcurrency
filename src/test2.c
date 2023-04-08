@@ -16,7 +16,7 @@ int main(void){
     rl_fcntl(desc, F_SETLKW, &f);
     rl_print_open_file(desc.f);
 
-    printf("==== Fermeture du descripteur");
+    printf("==== Fermeture du descripteur ====\n");
     rl_close(desc);
     rl_print_open_file(desc.f);
 }
