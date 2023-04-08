@@ -446,8 +446,6 @@ static int rl_cut(rl_lock *lock_table, rl_lock *current, int cut_pos)
 
 static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o, int first)
 {
-    //Si on est arrivé à la fin de la liste
-    printf("%d\n", pos);
     if(pos == -1 || pos == -2) return pos;
     rl_lock *current = lock_table + pos;
 
@@ -631,7 +629,7 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
         pthread_mutex_unlock(&lfd.f->mutex_list);
 
         pthread_cond_signal(&lfd.f->cond_list);
-        
+
         return 0;
     }
 
