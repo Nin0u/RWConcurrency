@@ -11,6 +11,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <signal.h>
 
 #define PREFIX "f"
 
@@ -132,6 +133,9 @@ static rl_open_file *open_shm(const char *path)
             file->lock_table[i].next_lock = -2;
         if(initialiser_mutex(&file->mutex_list) != 0)
             return NULL;
+        if(initialiser_cond(&file->cond_list) != 0){
+            return NULL;
+        }
     }
 
     return file;
@@ -227,7 +231,7 @@ static int rl_remove_owner(rl_lock *lock_table, int pos, owner o)
     return pos;
 }
 
-int rl_close( rl_descriptor lfd)
+int rl_close(rl_descriptor lfd)
 {
     if(close(lfd.d) == -1) return -1;
     if(lfd.f->first == -2) return 0;
@@ -236,7 +240,6 @@ int rl_close( rl_descriptor lfd)
     //Comme on vérouille la liste, pas besoin de vérouiller lors du parcours des owners des locks
     pthread_mutex_lock(&lfd.f->mutex_list);
 
-    printf("LOCKED CLOSE\n");
     owner o = {.proc = getpid(), .des = lfd.d};
     lfd.f->first = rl_remove_owner(lfd.f->lock_table, lfd.f->first, o);
 
@@ -245,7 +248,9 @@ int rl_close( rl_descriptor lfd)
 
     pthread_mutex_unlock(&lfd.f->mutex_list);
 
-    //TODO: Pour le SETLKW -> réveiller les gens bloquer par la cond !
+    // On réveille les processus attendant sur cond
+    pthread_cond_signal(&lfd.f->cond_list);
+
     return 0;
 }
 
@@ -522,16 +527,17 @@ static int rl_add_lock(rl_descriptor lfd, int cmd, struct flock *lck)
     else if(lck->l_type == F_RDLCK)
         pos = rl_add_readlck(lfd.f->lock_table, lfd.f->first, lck, o, 0);
     
+    // EAGAIN : Ressource temporairement non disponible
     if(pos == -3)
     {
         printf("Overlapp\n");
-        //TODO: errno
+        errno = EAGAIN;
         return -1;
     }
     if(pos == -2)
     {
         printf("No Place\n");
-        //TODO: errno
+        errno = EAGAIN;
         return -1;
     }
     lfd.f->first = pos;
@@ -582,13 +588,37 @@ static int rl_replace_lock(rl_descriptor lfd, struct flock *lck, int pos, owner 
 
 int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 {
-    if(cmd != F_SETLK && cmd != F_SETLKW && cmd != F_UNLCK) return -1;
-    //TODO: Pour plus tard : Si F_SETLKW alors vérifier qu'on peut mettre le lck, sinon on wait sur le cond
+    if(cmd != F_SETLK && cmd != F_SETLKW && cmd != F_GETLK) return -1;
 
     owner o = {.proc = getpid(), .des = lfd.d};
 
-    pthread_mutex_lock(&lfd.f->mutex_list);
-    //TODO: si y a des processus propriétaire de lck non vivants, on les enlèves, on clean quoi !
+    // Si y a des processus propriétaire de lck non vivants, on les enlève.
+    if(lfd.f->first != -2) {
+        rl_lock *aux = lfd.f->lock_table + lfd.f->first;
+
+        if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock1;
+
+        while (aux->next_lock != -1){
+            // On balaye tous les propriétaires des verrous du fichier en mémoire partagée
+            int limit = aux->nb_owners;
+            for (int i = 0; i < limit; i ++){
+                // On vérifie si le processus propriétaire existe
+                if (kill(aux->lock_owners[i].proc, 0) == -1 && errno == ESRCH)
+                    rl_remove_owner(aux, i, aux->lock_owners[i]);
+            }
+            aux = lfd.f->lock_table + aux->next_lock;
+        }
+        // On traite le dernier verrou
+        int limit = aux->nb_owners;
+        for (int i = 0; i < limit; i ++){
+             if (kill(aux->lock_owners[i].proc, 0) == -1 && errno == ESRCH)
+                rl_remove_owner(aux, i, aux->lock_owners[i]);
+        }
+
+        if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock1;
+    }
+
+    if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock2;
 
     if(cmd == F_UNLCK)
     {
@@ -603,27 +633,55 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
         return 0;
     }
 
+    // Cas du cmd == F_SETLK ou F_SETLKW
     int pos = -2;
     if(lfd.f->first != -2 )
-        rl_find(lfd.f->lock_table, lfd.f->first, lck);
+        pos = rl_find(lfd.f->lock_table, lfd.f->first, lck);
 
     // Si n'est pas dans les lck, on l'ajoute
     if(pos == -2)
     {   
         int r = rl_add_lock(lfd, cmd, lck);
-        //TODO: Suivant r bolquer ou pas !
-        pthread_mutex_unlock(&lfd.f->mutex_list);
+        while(cmd == F_SETLKW && (r == -2 || r == -3)) {
+            pthread_cond_wait(&lfd.f->cond_list, &lfd.f->mutex_list);
+        }
+        if (cmd == F_SETLKW && (r != 2) && (r != -3)) r = rl_add_lock(lfd, cmd, lck);
+        if(pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock2;
+
         return r;
-    } else {
-        // TODO: Suivant r bloquer ou pas !
+    } 
+
+    else 
+    {
         int r = rl_replace_lock(lfd, lck, pos, o);
-        pthread_mutex_unlock(&lfd.f->mutex_list);
+        while(cmd == F_SETLKW && (r == -2 || r == -3)) {
+            pthread_cond_wait(&lfd.f->cond_list, &lfd.f->mutex_list);
+        }
+        if (cmd == F_SETLKW && (r != 2) && (r != -3)) r = rl_replace_lock(lfd, lck, pos, o);
+        if(pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock2;
+
         return r;
         
     }
 
     pthread_mutex_unlock(&lfd.f->mutex_list);
     return 0;
+
+error_lock1 :
+    perror("pthread_mutex_lock lors du nettoyage de rl_fcntl");
+    return -1;
+
+error_unlock1 :
+    perror("pthread_mutex_unlock lors du nettoyage de rl_fcntl");
+    return -1;
+
+error_lock2 :
+    perror("pthread_mutex_lock de rl_fcntl");
+    return -1;
+
+error_unlock2 :
+    perror("pthread_mutex_unlock de rl_fcntl");
+    return -1;
 }
 
 /**
@@ -833,7 +891,7 @@ pid_t rl_fork(){
         }
         if (pthread_mutex_unlock(l) < 0) return -4;
     }
-    
+
     return 0;
 }
 

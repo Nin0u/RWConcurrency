@@ -2,7 +2,6 @@
 #define RL_LOCK_H
 
 #include <sys/types.h>
-#include <pthread.h>
 #include "owner.h"
 
 #define NB_OWNERS 20
@@ -18,8 +17,7 @@ typedef struct rl_lock
     short type; //F_RDLCK F_WRLCK
     size_t nb_owners; //nb de owners
     owner lock_owners[NB_OWNERS];
-
-    pthread_mutex_t mutex_owners; // Utilser lorsqu'on modifie le lock_owners et nb_owners !
+    
 } rl_lock;
 
 

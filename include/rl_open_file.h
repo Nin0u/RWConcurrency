@@ -1,6 +1,7 @@
 #ifndef RL_OPEN_FILE
 #define RL_OPEN_FILE
 
+#include <pthread.h>
 #include "rl_lock.h"
 
 #define NB_LOCKS 32
@@ -15,6 +16,8 @@ typedef struct rl_open_file
     rl_lock lock_table[NB_LOCKS];
 
     pthread_mutex_t mutex_list; //Utiliser lorsqu'on modifie la liste !
+    pthread_cond_t cond_list;
+
 } rl_open_file;
 
 
