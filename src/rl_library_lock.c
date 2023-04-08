@@ -527,7 +527,7 @@ static int rl_add_lock(rl_descriptor lfd, int cmd, struct flock *lck)
     // EAGAIN : Ressource temporairement non disponible
     if(pos == -3)
     {
-        printf("Overlapp\n");
+        printf("Overlap\n");
         errno = EAGAIN;
         return -1;
     }

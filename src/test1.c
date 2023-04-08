@@ -34,6 +34,12 @@ int main(void){
     f.l_whence = SEEK_CUR;
     f.l_len = 10;
     rl_fcntl(desc, F_SETLK, &f);
+
+    f.l_start = 15;
+    f.l_type = F_WRLCK;
+    f.l_len = 10; 
+    rl_fcntl(desc, F_SETLK, &f); 
+
     rl_print_open_file(desc.f);
 
     printf("Attente de SIGUSR1 sur %d pour retirer le verrou\n", getpid());
@@ -41,6 +47,6 @@ int main(void){
 
     printf("==== Dévérouillage de (5,15) ====\n");
     rl_print_open_file(desc.f);
-    
+
     return EXIT_SUCCESS;
 }
