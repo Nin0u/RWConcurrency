@@ -127,6 +127,7 @@ static rl_open_file *open_shm(const char *path)
 
     if(first) 
     {
+        printf("FIRST\n");
         //Initialise le file !
         file->first = -2;
         for(int i = 0; i < NB_LOCKS; i++)
@@ -242,6 +243,7 @@ int rl_close(rl_descriptor lfd)
 
     owner o = {.proc = getpid(), .des = lfd.d};
     lfd.f->first = rl_remove_owner(lfd.f->lock_table, lfd.f->first, o);
+
 
     // Cas si y a plus personne dans la liste (la fonction revoie -1 si c'est le cas)
     if(lfd.f->first == -1) lfd.f->first = -2;
@@ -591,10 +593,10 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
     owner o = {.proc = getpid(), .des = lfd.d};
 
     // Si y a des processus propriétaire de lck non vivants, on les enlève.
+    if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock1;
     if(lfd.f->first != -2) {
         rl_lock *aux = lfd.f->lock_table + lfd.f->first;
 
-        if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock1;
 
         while (aux->next_lock != -1){
             // On balaye tous les propriétaires des verrous du fichier en mémoire partagée
@@ -612,12 +614,10 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
              if (kill(aux->lock_owners[i].proc, 0) == -1 && errno == ESRCH)
                 remove_owner_in_lock(aux, i, aux->lock_owners[i]);
         }
-
-        if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock1;
     }
+    if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock1;
 
     if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock2;
-
     if(lck->l_type == F_UNLCK)
     {
         int r = rl_unlock(lfd.f->lock_table, lfd.f->first, lck, o, lfd.f->first);
@@ -635,39 +635,42 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
     }
 
     // Cas du cmd == F_SETLK ou F_SETLKW
-    int pos = -2;
-    if(lfd.f->first != -2 )
-        pos = rl_find(lfd.f->lock_table, lfd.f->first, lck);
 
-    // Si n'est pas dans les lck, on l'ajoute
-    if(pos == -2)
-    {   
-        int r = rl_add_lock(lfd, cmd, lck);
-        while(cmd == F_SETLKW && (r == -2 || r == -3)) {
-            pthread_cond_wait(&lfd.f->cond_list, &lfd.f->mutex_list);
-            r = rl_add_lock(lfd, cmd, lck);
+    while(1) {
+        int pos = -2;
+        if(lfd.f->first != -2 )
+            pos = rl_find(lfd.f->lock_table, lfd.f->first, lck);
+
+        // Si n'est pas dans les lck, on l'ajoute
+        if(pos == -2)
+        {   
+            int r = rl_add_lock(lfd, cmd, lck);
+            if(cmd == F_SETLKW) {
+                if(r != -2 && r != -3) break;
+                pthread_cond_wait(&lfd.f->cond_list, &lfd.f->mutex_list);
+            } else {
+                pthread_mutex_unlock(&lfd.f->mutex_list);
+                return r;
+            }
+
+        } 
+
+         else 
+        {
+            int r = rl_replace_lock(lfd, lck, pos, o);
+            if(cmd == F_SETLKW) {
+                if(r != -2 && r != -3) break;
+                pthread_cond_wait(&lfd.f->cond_list, &lfd.f->mutex_list);
+            } else {
+                pthread_mutex_unlock(&lfd.f->mutex_list);
+                return r;
+            }
         }
 
-        if(pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock2;
 
-        return r;
-    } 
-
-    else 
-    {
-        int r = rl_replace_lock(lfd, lck, pos, o);
-        while(cmd == F_SETLKW && (r == -2 || r == -3)) {
-            pthread_cond_wait(&lfd.f->cond_list, &lfd.f->mutex_list);
-            r = rl_add_lock(lfd, cmd, lck);
-        }
-
-        if(pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock2;
-
-        return r;
-        
     }
-
     pthread_mutex_unlock(&lfd.f->mutex_list);
+
     return 0;
 
 error_lock1 :
@@ -710,13 +713,16 @@ rl_descriptor rl_dup(rl_descriptor lfd)
     int pid = getpid();
 
     rl_descriptor new_rl_descriptor = {.d = newd, .f = lfd.f};
-    if(lfd.f->first == -2) return new_rl_descriptor;
+    if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock;
+    if(lfd.f->first == -2) {
+        pthread_mutex_unlock(&lfd.f->mutex_list);
+        return new_rl_descriptor;
+    }
 
     // On duplique toutes les occurrences de lfd_owner comme propriétaire de verrou
     // On le fait de manière itérative
     rl_lock *aux = lfd.f->lock_table + lfd.f->first;
 
-    if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock;
 
     while (aux->next_lock != -1){
         // On balaye tous les propriétaires des verrous du fichier en mémoire partagée
@@ -791,12 +797,15 @@ rl_descriptor rl_dup2(rl_descriptor lfd, int newd){
 
     rl_descriptor new_rl_descriptor = {.d = newd, .f = lfd.f};
 
-    if(lfd.f->first == -2) return new_rl_descriptor;
+    if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock;
+    if(lfd.f->first == -2) {
+        pthread_mutex_unlock(&lfd.f->mutex_list);
+        return new_rl_descriptor;
+    }
     // On duplique toutes les occurrences de lfd_owner comme propriétaire de verrou
     // On le fait de manière itérative
     rl_lock *aux = lfd.f->lock_table + lfd.f->first;
 
-    if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock;
     while (aux->next_lock != -1){
         // On balaye tous les propriétaires des verrous du fichier en mémoire partagée
         int limit = aux->nb_owners;
