@@ -5,7 +5,7 @@ CCO=$(CC) $(INCL) -c $< -o $@
 # Make an obj/ directrory to store all .o files
 OBJ_DIR=@mkdir obj -p
 
-INC=include/owner.h include/rl_lock.h include/rl_open_file.h include/rl_descriptor.h include/rl_all_file.h
+INC=include/owner.h include/rl_lock.h include/rl_open_file.h include/rl_descriptor.h include/rl_all_file.h include/deadlock.h
 
 # Final Objects
 OBJECTS=obj/main.o obj/rl_library_lock.o
@@ -15,7 +15,7 @@ TOBJECTS=obj/test1.o obj/test2.o obj/test3.o
 TARGET=main
 TTARGET=test1 test2 test3 
 
-all: $(TARGET) $(TTARGET)
+all: $(TARGET) test
 
 #==== Clean rule =====#
 clean:

@@ -12,11 +12,22 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <signal.h>
+#include "deadlock.h"
 
 #define PREFIX "f"
 
 /** Variable globale statique qui contient tous nos fichiers ouverts. */
 static rl_all_file all_file;
+
+
+/** DEADLOCK */
+static deadlock *dlck;
+static int dlck_init = 0;
+
+void initialiser_deadlock();
+int get_owner_lock(rl_lock *lock_table, int pos, struct flock *lck, owner o, owner *pred_own, int nb);
+void add_deadlock(owner o, struct flock lck, char *shm);
+void remove_deadlock(owner o);
 
 /**
  * Initialise un mutex 
@@ -86,6 +97,7 @@ int rl_init_library()
 
 static rl_open_file *open_shm(const char *path)
 {
+    if(!dlck_init) initialiser_deadlock();
     struct stat st;
     if(stat(path, &st) == -1) 
     {
@@ -127,7 +139,6 @@ static rl_open_file *open_shm(const char *path)
 
     if(first) 
     {
-        printf("FIRST\n");
         //Initialise le file !
         file->first = -2;
         for(int i = 0; i < NB_LOCKS; i++)
@@ -137,6 +148,9 @@ static rl_open_file *open_shm(const char *path)
         if(initialiser_cond(&file->cond_list) != 0){
             return NULL;
         }
+
+        memset(file->shm, 0, 256);
+        strncpy(file->shm, path, 256);
     }
 
     return file;
@@ -617,6 +631,8 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
     }
     if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock1;
 
+   // pthread_mutex_lock(&dlck->mutex);
+
     if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock2;
     if(lck->l_type == F_UNLCK)
     {
@@ -945,4 +961,141 @@ void rl_print_lock_tab(rl_lock *lock, int first)
         return;
     }
     rl_print_lock_table(lock, first);
+}
+
+
+// DEADLOCKS
+
+void initialiser_deadlock()
+{
+    int fd = shm_open("/f_deadlock", O_RDWR | O_EXCL, S_IRWXU | S_IRWXG);
+    int first = 0;
+    if(fd == -1 && errno == ENOENT) {
+        first = 1;
+        fd = shm_open("/f_deadlock", O_RDWR | O_CREAT, S_IRWXU | S_IRWXG);
+        if(fd == -1) {
+            perror("open deadlock !");
+            exit(1);
+        }
+        ftruncate(fd, sizeof(deadlock));
+    }
+
+    dlck = mmap(0, sizeof(deadlock), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if(dlck == MAP_FAILED) {
+        perror("mmap");
+        exit(1);
+    }
+
+    if(first) 
+    {
+        dlck->nb = 0;
+        initialiser_mutex(&dlck->mutex);
+    }
+
+    dlck_init = 1;
+}
+
+
+int get_owner_lock(rl_lock *lock_table, int pos, struct flock *lck, owner o, owner *pred_own, int nb)
+{
+    if(pos == -2 || pos == -2) return nb;
+    rl_lock *current = lock_table + pos;
+
+    //Chevauche
+    if((lck->l_start <= current->starting_offset && lck->l_start + lck->l_len > current->starting_offset)
+    || (current->starting_offset <= lck->l_start && current->starting_offset + current->len > lck->l_start))
+    {
+        //Si l'un des 2 est write, le chevauchement est prohibé
+        if(lck->l_type == F_WRLCK || current->type == F_WRLCK) {
+            //On parcourt
+            for(int i = 0; i < current->nb_owners; i++) {
+                owner oc = current->lock_owners[i];
+                //Si c'est un owner différent de nous, on l'ajoute que si il est pas déjà ajouté
+                if(oc.des != o.des || oc.proc != o.proc) {
+                    int found = 0;
+                    for(int j = 0; j < nb; j++) {
+                        owner op = pred_own[j];
+                        if(op.des == oc.des && op.proc == oc.proc) {
+                            found = 1;
+                            break;
+                        }
+                    }
+                    if(!found) {
+                        pred_own[nb].des = oc.des;
+                        pred_own[nb].proc = oc.proc;
+                        nb++;
+                    }
+                }
+            }
+        }
+    }
+
+    //Appelle récursif
+    return get_owner_lock(lock_table, current->next_lock, lck, o, pred_own, nb);
+}
+
+void add_deadlock(owner o, struct flock lck, char *shm)
+{
+    dlck->o[dlck->nb] = o;
+    dlck->lck[dlck->nb] = lck;
+    memset(dlck->shm[dlck->nb], 0, MAX_LEN_SHM);
+    strncpy(dlck->shm[dlck->nb], shm, MAX_LEN_SHM);
+    dlck->nb++;
+}
+
+void remove_deadlock(owner o)
+{
+    for(int i = 0; i < dlck->nb; i++) {
+        if(o.proc == dlck->o[i].proc && o.des == dlck->o[i].des) {
+            for(int j = i; j < dlck->nb; j++) {
+                dlck->o[j] = dlck->o[j + 1];
+                dlck->lck[j] = dlck->lck[j + 1];
+                strncpy(dlck->shm[j], dlck->shm[j + 1], MAX_LEN_SHM);
+            }
+            break;
+        }
+    }
+}
+
+int is_in_deadlock(owner o)
+{
+    for(int i = 0; i < dlck->nb; i++) {
+        if(o.proc == dlck->o[i].proc && o.des == dlck->o[i].des) return i;
+    }
+    return -1;
+}
+
+// Fonction permettant de dire si oui ou non y aura un deadlock
+// On regarde les owner qui gene le owner o qui veut le lock lck dans le fichier shm
+// Si on trouve un owner avec un pid == getpid(), on a un deadlock
+// Si on trouve un owner qui dort (i.e. dans le tableau de deadlock dans le shm)
+// Alors il faut regarder si lui peut etre bloqué par nous
+int verif_lock(owner o, struct flock *lck, char *shm, char *shm_opened)
+{
+    owner pred_own[256];
+    memset(pred_own, 0, sizeof(owner) * 256);
+
+    printf("%s\n", shm);
+
+    rl_open_file *file = open_shm(shm);
+    if(!strcmp(shm_opened, shm)) {
+        pthread_mutex_lock(&file->mutex_list);
+    }
+
+    int nb = get_owner_lock(file->lock_table, file->first, lck, o, pred_own, 0);
+
+    if(!strcmp(shm_opened, shm)) {
+        pthread_mutex_unlock(&file->mutex_list);
+    }
+
+    pid_t p = getpid();
+    for(int i = 0; i < nb; i++) {
+        if(pred_own[i].proc == p) return 0;
+        int index = is_in_deadlock(o);
+        if(index != -1) {
+            int r = verif_lock(dlck->o[index], dlck->lck + i, dlck->shm[i], shm_opened);
+            if(r == 0) return 0;
+        }
+    }
+    return 1;
 }

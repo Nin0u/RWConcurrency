@@ -15,9 +15,10 @@ typedef struct rl_open_file
     int first;
     rl_lock lock_table[NB_LOCKS];
 
+    char shm[256];
+
     pthread_mutex_t mutex_list; //Utiliser lorsqu'on modifie la liste !
     pthread_cond_t cond_list;
-
 } rl_open_file;
 
 
