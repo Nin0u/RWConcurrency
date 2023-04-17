@@ -1,7 +1,7 @@
 # Générés par make
 obj/
 main
-test*
+test
 
 # Généré par vscode
 .vscode/
