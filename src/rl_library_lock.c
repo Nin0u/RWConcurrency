@@ -631,11 +631,10 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
     }
     if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock1;
 
-   // pthread_mutex_lock(&dlck->mutex);
 
-    if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock2;
     if(lck->l_type == F_UNLCK)
     {
+        if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock2;
         int r = rl_unlock(lfd.f->lock_table, lfd.f->first, lck, o, lfd.f->first);
         if(r == -3) {
             pthread_mutex_unlock(&lfd.f->mutex_list);
@@ -651,7 +650,9 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
     }
 
     // Cas du cmd == F_SETLK ou F_SETLKW
-
+    
+    // pthread_mutex_lock(&dlck->mutex);
+    if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock2;
     while(1) {
         int pos = -2;
         if(lfd.f->first != -2 )
@@ -663,7 +664,15 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
             int r = rl_add_lock(lfd, cmd, lck);
             if(cmd == F_SETLKW) {
                 if(r != -2 && r != -3) break;
+                // Je verifie
+                // Si pas bon je renvoie une erreur
+                // sinon je m ajoute à la liste 
+                // j enleve le lock
+
                 pthread_cond_wait(&lfd.f->cond_list, &lfd.f->mutex_list);
+
+                //J enleve le lock mutex list, je prend le deadlock, et je reprend le lock
+                //Je reprend le lock, et je m enleve de la liste
             } else {
                 pthread_mutex_unlock(&lfd.f->mutex_list);
                 return r;
@@ -676,6 +685,8 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
             int r = rl_replace_lock(lfd, lck, pos, o);
             if(cmd == F_SETLKW) {
                 if(r != -2 && r != -3) break;
+
+
                 pthread_cond_wait(&lfd.f->cond_list, &lfd.f->mutex_list);
             } else {
                 pthread_mutex_unlock(&lfd.f->mutex_list);
