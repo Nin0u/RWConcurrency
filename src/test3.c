@@ -50,6 +50,6 @@ int main()
 
     rl_close(desc);
     printf("J'unlock %d\n", getpid());
-    //wait(NULL);
+    wait(NULL);
     return 0;
 }

@@ -723,6 +723,7 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                     return -3;
                 } else {
                     // sinon je m ajoute à la liste 
+                    printf("AJOUT DANS DLCK\n");
                     add_deadlock(o, *lck, lfd.f->shm);
                 }
                 // j enleve le lock
@@ -735,6 +736,7 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                 pthread_mutex_lock(&lfd.f->mutex_list);
                 //je m enleve de la liste
                 remove_deadlock(o);
+                printf("RM DANS DLCK\n");
             } else {
                 pthread_mutex_unlock(&lfd.f->mutex_list);
                 return r;
@@ -1111,6 +1113,7 @@ void remove_deadlock(owner o)
                 dlck->lck[j] = dlck->lck[j + 1];
                 strncpy(dlck->shm[j], dlck->shm[j + 1], MAX_LEN_SHM);
             }
+            dlck->nb--;
             break;
         }
     }
@@ -1119,7 +1122,8 @@ void remove_deadlock(owner o)
 int is_in_deadlock(owner o)
 {
     for(int i = 0; i < dlck->nb; i++) {
-        if(o.proc == dlck->o[i].proc && o.des == dlck->o[i].des) return i;
+        printf(" - %d %d\n", dlck->o[i].proc, dlck->o[i].des);
+        if(o.proc == dlck->o[i].proc) return i;
     }
     return -1;
 }
@@ -1136,11 +1140,14 @@ int verif_lock(owner o, struct flock *lck, char *shm, char *shm_opened)
 
     printf("shm = %s\n", shm);
     printf("shm_opened = %s\n",shm_opened);
+    printf("des : %d proc : %d\n", o.des, o.proc);
 
     rl_open_file *file = open_shm(shm);
     if(strcmp(shm_opened, shm)) {
         pthread_mutex_lock(&file->mutex_list);
     }
+    printf("A : ");
+    rl_print_open_file(file);
 
     printf("DEBUT\n");
     int nb = get_owner_lock(file->lock_table, file->first, lck, o, pred_own, 0);
@@ -1152,12 +1159,15 @@ int verif_lock(owner o, struct flock *lck, char *shm, char *shm_opened)
     for(int i = 0; i < nb; i++) {
         printf("(%d, %d) ", pred_own[i].des, pred_own[i].proc);
     }
+    printf("\n");
 
     pid_t p = getpid();
     for(int i = 0; i < nb; i++) {
         if(pred_own[i].proc == p) return 0;
-        int index = is_in_deadlock(o);
+        int index = is_in_deadlock(pred_own[i]);
+        printf("index = %d\n", index);
         if(index != -1) {
+            sleep(1);
             int r = verif_lock(dlck->o[index], dlck->lck + i, dlck->shm[i], shm_opened);
             if(r == 0) return 0;
         }
