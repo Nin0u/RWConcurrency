@@ -601,6 +601,8 @@ static int rl_replace_lock(rl_descriptor lfd, struct flock *lck, int pos, owner 
 
 }
 
+//TODO: Ajouter un merge des verrou
+
 int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 {
     if(cmd != F_SETLK && cmd != F_SETLKW && cmd != F_GETLK) return -1;
@@ -666,12 +668,12 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
             if(cmd == F_SETLKW) {
                 if(r != -2 && r != -3) break;
 
-                printf("VERIF\n");
+                //printf("VERIF\n");
 
                 // Je verifie
                 int verif = verif_lock(o, lck, lfd.f->shm, lfd.f->shm);
 
-                printf("VERIF FIN\n");
+               // printf("VERIF FIN\n");
 
                 // Si pas bon je renvoie une erreur
                 if(!verif) {
@@ -707,12 +709,12 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
             if(cmd == F_SETLKW) {
                 if(r != -2 && r != -3) break;
 
-                printf("VERIF\n");
+                //printf("VERIF\n");
 
                 // Je verifie
                 int verif = verif_lock(o, lck, lfd.f->shm, lfd.f->shm);
 
-                printf("VERIF FIN\n");
+                //printf("VERIF FIN\n");
 
                 // Si pas bon je renvoie une erreur
                 if(!verif) {
@@ -723,7 +725,7 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                     return -3;
                 } else {
                     // sinon je m ajoute à la liste 
-                    printf("AJOUT DANS DLCK\n");
+                    //printf("AJOUT DANS DLCK\n");
                     add_deadlock(o, *lck, lfd.f->shm);
                 }
                 // j enleve le lock
@@ -736,7 +738,7 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                 pthread_mutex_lock(&lfd.f->mutex_list);
                 //je m enleve de la liste
                 remove_deadlock(o);
-                printf("RM DANS DLCK\n");
+                //printf("RM DANS DLCK\n");
             } else {
                 pthread_mutex_unlock(&lfd.f->mutex_list);
                 return r;
@@ -1063,6 +1065,7 @@ int get_owner_lock(rl_lock *lock_table, int pos, struct flock *lck, owner o, own
     rl_lock *current = lock_table + pos;
 
     //Chevauche
+    //TODO: Oublié le cas len = 0
     if((lck->l_start <= current->starting_offset && lck->l_start + lck->l_len > current->starting_offset)
     || (current->starting_offset <= lck->l_start && current->starting_offset + current->len > lck->l_start))
     {
@@ -1097,10 +1100,12 @@ int get_owner_lock(rl_lock *lock_table, int pos, struct flock *lck, owner o, own
 
 void add_deadlock(owner o, struct flock lck, char *shm)
 {
+    //printf("nb = %d ADD : %s\n", dlck->nb, shm);
     dlck->o[dlck->nb] = o;
     dlck->lck[dlck->nb] = lck;
     memset(dlck->shm[dlck->nb], 0, MAX_LEN_SHM);
     strncpy(dlck->shm[dlck->nb], shm, MAX_LEN_SHM);
+    //printf("FIN ADD : %s\n", dlck->shm[dlck->nb]);
     dlck->nb++;
 }
 
@@ -1122,7 +1127,7 @@ void remove_deadlock(owner o)
 int is_in_deadlock(owner o)
 {
     for(int i = 0; i < dlck->nb; i++) {
-        printf(" - %d %d\n", dlck->o[i].proc, dlck->o[i].des);
+        //printf(" - %d %d\n", dlck->o[i].proc, dlck->o[i].des);
         if(o.proc == dlck->o[i].proc) return i;
     }
     return -1;
@@ -1133,42 +1138,43 @@ int is_in_deadlock(owner o)
 // Si on trouve un owner avec un pid == getpid(), on a un deadlock
 // Si on trouve un owner qui dort (i.e. dans le tableau de deadlock dans le shm)
 // Alors il faut regarder si lui peut etre bloqué par nous
+//TODO: Stocker vraiment le SHM
+//TODO: Changer la fonction d'ouverture car provoque trop de fd non fermé
 int verif_lock(owner o, struct flock *lck, char *shm, char *shm_opened)
 {
     owner pred_own[256];
     memset(pred_own, 0, sizeof(owner) * 256);
 
-    printf("shm = %s\n", shm);
-    printf("shm_opened = %s\n",shm_opened);
-    printf("des : %d proc : %d\n", o.des, o.proc);
+    // printf("shm = %s\n", shm);
+    // printf("shm_opened = %s\n",shm_opened);
+    // printf("des : %d proc : %d\n", o.des, o.proc);
 
     rl_open_file *file = open_shm(shm);
     if(strcmp(shm_opened, shm)) {
         pthread_mutex_lock(&file->mutex_list);
     }
-    printf("A : ");
-    rl_print_open_file(file);
+    //printf("A : ");
+    //rl_print_open_file(file);
 
-    printf("DEBUT\n");
+    //printf("DEBUT\n");
     int nb = get_owner_lock(file->lock_table, file->first, lck, o, pred_own, 0);
-    printf("FIN\n");
+    //printf("FIN\n");
     if(strcmp(shm_opened, shm)) {
         pthread_mutex_unlock(&file->mutex_list);
     }
 
-    for(int i = 0; i < nb; i++) {
-        printf("(%d, %d) ", pred_own[i].des, pred_own[i].proc);
-    }
-    printf("\n");
+    // for(int i = 0; i < nb; i++) {
+    //     printf("(%d, %d) ", pred_own[i].des, pred_own[i].proc);
+    // }
+    // printf("\n");
 
     pid_t p = getpid();
     for(int i = 0; i < nb; i++) {
         if(pred_own[i].proc == p) return 0;
         int index = is_in_deadlock(pred_own[i]);
-        printf("index = %d\n", index);
+        //printf("index = %d\n", index);
         if(index != -1) {
-            sleep(1);
-            int r = verif_lock(dlck->o[index], dlck->lck + i, dlck->shm[i], shm_opened);
+            int r = verif_lock(dlck->o[index], dlck->lck + index, dlck->shm[index], shm_opened);
             if(r == 0) return 0;
         }
     }

@@ -46,7 +46,9 @@ int main()
 
         printf("P1 va poser verrou du F2, mais va bloquer\n");
         rl_fcntl(desc2, F_SETLKW, &f2);
-        printf("P1 n'a pas bloquer\n");
+        
+        rl_close(desc1);
+        rl_close(desc2);
 
 
     } else {
@@ -85,7 +87,10 @@ int main()
             f3.l_len = 10;
             printf("P2 va poser un Verrou sur F3, mais va bloquer\n");        
             rl_fcntl(desc3, F_SETLKW, &f3);
-            printf("P2 n'a pas bloquer\n");
+            
+            rl_close(desc3);
+            rl_close(desc2);
+
         } else {
             printf("P3 : %d\n", getpid());
 
@@ -117,7 +122,12 @@ int main()
             printf("P3 va poser un Verrou sur F1, mais va bloquer et DEADLOCK\n");        
             rl_fcntl(desc1, F_SETLKW, &f1); 
 
-            printf("FIN\n");           
+            rl_close(desc3);
+            rl_close(desc1);
+            printf("FIN\n");  
+
+            while(wait(NULL) != -1);
+
         }
 
     }

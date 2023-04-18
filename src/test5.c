@@ -45,7 +45,9 @@ int main()
 
         printf("P1 va poser verrou du F2, mais va bloquer\n");
         rl_fcntl(desc2, F_SETLKW, &f2);
-        printf("P1 n'a pas bloquer\n");
+
+        rl_close(desc1);
+        rl_close(desc2);
 
 
     } else {
@@ -78,6 +80,9 @@ int main()
         f1.l_len = 10;
         printf("P2 va poser un verrou mais va Deadlock\n");        
         rl_fcntl(desc1, F_SETLKW, &f1);
+
+        rl_close(desc1);
+        rl_close(desc2);
 
     }
 }
