@@ -107,9 +107,9 @@ static rl_open_file *open_shm(const char *path)
     }
 
     // On construit la chaine de caractères
-    char name[64];
-    memset(name, 0, 64);
-    snprintf(name, 64,"/%s_%ld_%ld", PREFIX, st.st_dev, st.st_ino);
+    char name[256];
+    memset(name, 0, 256);
+    snprintf(name, 256,"/%s_%ld_%ld", PREFIX, st.st_dev, st.st_ino);
 
     int fd = shm_open(name, O_RDWR | O_EXCL, S_IRWXU | S_IRWXG);
 
@@ -138,6 +138,8 @@ static rl_open_file *open_shm(const char *path)
         return NULL;
     }
 
+    all_file.fd_shm[all_file.nb_files] = fd;
+
     if(first) 
     {
         //Initialise le file !
@@ -151,7 +153,7 @@ static rl_open_file *open_shm(const char *path)
         }
 
         memset(file->shm, 0, 256);
-        strncpy(file->shm, path, 256);
+        strncpy(file->shm, name, 256);
     }
 
     return file;
@@ -253,7 +255,6 @@ int rl_close(rl_descriptor lfd)
     if(lfd.f->first == -2) return 0;
 
     //On vérouille car on va modifier la liste (potentiellement)
-    //Comme on vérouille la liste, pas besoin de vérouiller lors du parcours des owners des locks
     pthread_mutex_lock(&lfd.f->mutex_list);
 
     owner o = {.proc = getpid(), .des = lfd.d};
@@ -267,6 +268,17 @@ int rl_close(rl_descriptor lfd)
 
     // On réveille les processus attendant sur cond
     pthread_cond_signal(&lfd.f->cond_list);
+
+    for(int i = 0; i < all_file.nb_files; i++) {
+        if(all_file.tab_open_files[i] == lfd.f) {
+            close(all_file.fd_shm[i]);
+            for(int j = i; j < all_file.nb_files - 1; j++) {
+                all_file.tab_open_files[j] = all_file.tab_open_files[j + 1];
+            }
+            all_file.nb_files--;
+            break;
+        }
+    }
 
     return 0;
 }
@@ -1065,9 +1077,10 @@ int get_owner_lock(rl_lock *lock_table, int pos, struct flock *lck, owner o, own
     rl_lock *current = lock_table + pos;
 
     //Chevauche
-    //TODO: Oublié le cas len = 0
     if((lck->l_start <= current->starting_offset && lck->l_start + lck->l_len > current->starting_offset)
-    || (current->starting_offset <= lck->l_start && current->starting_offset + current->len > lck->l_start))
+    || (current->starting_offset <= lck->l_start && current->starting_offset + current->len > lck->l_start)
+    || (lck->l_len == 0 && lck->l_start <= current->starting_offset)
+    || (current->len == 0 && current->starting_offset <= lck->l_start))
     {
         //Si l'un des 2 est write, le chevauchement est prohibé
         if(lck->l_type == F_WRLCK || current->type == F_WRLCK) {
@@ -1113,7 +1126,7 @@ void remove_deadlock(owner o)
 {
     for(int i = 0; i < dlck->nb; i++) {
         if(o.proc == dlck->o[i].proc && o.des == dlck->o[i].des) {
-            for(int j = i; j < dlck->nb; j++) {
+            for(int j = i; j < dlck->nb - 1; j++) {
                 dlck->o[j] = dlck->o[j + 1];
                 dlck->lck[j] = dlck->lck[j + 1];
                 strncpy(dlck->shm[j], dlck->shm[j + 1], MAX_LEN_SHM);
@@ -1138,8 +1151,26 @@ int is_in_deadlock(owner o)
 // Si on trouve un owner avec un pid == getpid(), on a un deadlock
 // Si on trouve un owner qui dort (i.e. dans le tableau de deadlock dans le shm)
 // Alors il faut regarder si lui peut etre bloqué par nous
-//TODO: Stocker vraiment le SHM
 //TODO: Changer la fonction d'ouverture car provoque trop de fd non fermé
+
+rl_descriptor open_shm_dead(char *shm)
+{
+    int fd = shm_open(shm, O_RDWR, S_IRWXU | S_IRWXG);
+    if(fd == -1) {
+        perror("open shm dead");
+        exit(1);
+    }
+    rl_open_file *file = mmap(0, sizeof(rl_open_file), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+    if(file == MAP_FAILED) {
+        perror("mmap open shm dead");
+        exit(1);
+    }
+    rl_descriptor des = {fd, file};
+    return des;
+}
+
+
 int verif_lock(owner o, struct flock *lck, char *shm, char *shm_opened)
 {
     owner pred_own[256];
@@ -1149,7 +1180,9 @@ int verif_lock(owner o, struct flock *lck, char *shm, char *shm_opened)
     // printf("shm_opened = %s\n",shm_opened);
     // printf("des : %d proc : %d\n", o.des, o.proc);
 
-    rl_open_file *file = open_shm(shm);
+    rl_descriptor des = open_shm_dead(shm);
+
+    rl_open_file *file = des.f;
     if(strcmp(shm_opened, shm)) {
         pthread_mutex_lock(&file->mutex_list);
     }
@@ -1161,6 +1194,7 @@ int verif_lock(owner o, struct flock *lck, char *shm, char *shm_opened)
     //printf("FIN\n");
     if(strcmp(shm_opened, shm)) {
         pthread_mutex_unlock(&file->mutex_list);
+        close(des.d);
     }
 
     // for(int i = 0; i < nb; i++) {
