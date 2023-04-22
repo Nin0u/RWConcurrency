@@ -613,20 +613,11 @@ static int rl_replace_lock(rl_descriptor lfd, struct flock *lck, int pos, owner 
 
 }
 
-//TODO: Ajouter un merge des verrou
-
-int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
-{
-    if(cmd != F_SETLK && cmd != F_SETLKW && cmd != F_GETLK) return -1;
-
-    owner o = {.proc = getpid(), .des = lfd.d};
-
-    // Si y a des processus propriétaire de lck non vivants, on les enlève.
-    if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock1;
+/** Retire tous les verrous des prorpiétaires morts. */
+int rl_remove_dead_owner(rl_descriptor lfd) {
+    if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock;
     if(lfd.f->first != -2) {
         rl_lock *aux = lfd.f->lock_table + lfd.f->first;
-
-
         while (aux->next_lock != -1){
             // On balaye tous les propriétaires des verrous du fichier en mémoire partagée
             int limit = aux->nb_owners;
@@ -644,8 +635,27 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                 remove_owner_in_lock(aux, i, aux->lock_owners[i]);
         }
     }
-    if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock1;
+    if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock;
 
+error_lock :
+    perror("pthread_mutex_lock in rl_remove_dead_owner");
+    return -1;
+
+error_unlock :
+    perror("pthread_mutex_unlock in rl_remove_dead_owner");
+    return -1;
+}
+
+//TODO: Ajouter un merge des verrou
+int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
+{
+    // Commande inconnue
+    if(cmd != F_SETLK && cmd != F_SETLKW && cmd != F_GETLK) return -1;
+
+    owner o = {.proc = getpid(), .des = lfd.d};
+
+    // Si y a des processus propriétaire de lck non vivants, on les enlève.
+    if (rl_remove_dead_owner(lfd) < 0) return -1;
 
     if(lck->l_type == F_UNLCK)
     {
@@ -665,7 +675,6 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
     }
 
     // Cas du cmd == F_SETLK ou F_SETLKW
-    
     if(cmd == F_SETLKW) pthread_mutex_lock(&dlck->mutex);
     if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock2;
     while(1) {
@@ -680,12 +689,8 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
             if(cmd == F_SETLKW) {
                 if(r != -2 && r != -3) break;
 
-                //printf("VERIF\n");
-
                 // Je verifie
                 int verif = verif_lock(o, lck, lfd.f->shm, lfd.f->shm);
-
-               // printf("VERIF FIN\n");
 
                 // Si pas bon je renvoie une erreur
                 if(!verif) {
@@ -721,12 +726,8 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
             if(cmd == F_SETLKW) {
                 if(r != -2 && r != -3) break;
 
-                //printf("VERIF\n");
-
                 // Je verifie
                 int verif = verif_lock(o, lck, lfd.f->shm, lfd.f->shm);
-
-                //printf("VERIF FIN\n");
 
                 // Si pas bon je renvoie une erreur
                 if(!verif) {
@@ -763,14 +764,6 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
     pthread_mutex_unlock(&lfd.f->mutex_list);
 
     return 0;
-
-error_lock1 :
-    perror("pthread_mutex_lock lors du nettoyage de rl_fcntl");
-    return -1;
-
-error_unlock1 :
-    perror("pthread_mutex_unlock lors du nettoyage de rl_fcntl");
-    return -1;
 
 error_lock2 :
     perror("pthread_mutex_lock de rl_fcntl");
