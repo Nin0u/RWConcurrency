@@ -642,8 +642,10 @@ void rl_merge_locks(rl_descriptor lfd, rl_lock *aux, rl_lock *aux_next) {
         else if(aux_next->starting_offset + aux_next->len > aux->starting_offset + aux->len)
             aux->len = aux_next->starting_offset + aux_next->len - aux->starting_offset;
         
-        // TODO : On supprime le verrou aux_next;
-        aux->next_lock = aux_next->next_lock;
+        // On supprime le verrou aux_next;
+        int new_next = aux_next->next_lock;
+        aux_next->next_lock = -2;
+        aux->next_lock = new_next;
     }
 
     rl_merge_locks(lfd, aux, lfd.f->lock_table + aux_next->next_lock);
