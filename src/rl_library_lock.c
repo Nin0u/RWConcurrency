@@ -613,37 +613,69 @@ static int rl_replace_lock(rl_descriptor lfd, struct flock *lck, int pos, owner 
 
 }
 
-/** Retire tous les verrous des prorpiétaires morts. */
-int rl_remove_dead_owner(rl_descriptor lfd) {
-    if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock;
-    if(lfd.f->first != -2) {
-        rl_lock *aux = lfd.f->lock_table + lfd.f->first;
-        while (aux->next_lock != -1){
-            // On balaye tous les propriétaires des verrous du fichier en mémoire partagée
-            int limit = aux->nb_owners;
-            for (int i = 0; i < limit; i ++){
-                // On vérifie si le processus propriétaire existe, s'il n'existe pas on retire ses verrous
-                if (kill(aux->lock_owners[i].proc, 0) == -1 && errno == ESRCH)
-                    remove_owner_in_lock(aux, i, aux->lock_owners[i]);
-            }
-            aux = lfd.f->lock_table + aux->next_lock;
-        }
-        // On traite le dernier verrou
-        int limit = aux->nb_owners;
-        for (int i = 0; i < limit; i ++){
-             if (kill(aux->lock_owners[i].proc, 0) == -1 && errno == ESRCH)
-                remove_owner_in_lock(aux, i, aux->lock_owners[i]);
-        }
+/** Verifie si deux verrous possèdent EXACTEMENT les mêmes propriétaires. */
+int same_owners_in_locks(rl_lock *l1, rl_lock * l2) {
+    int nb_owners = l1->nb_owners;
+    if (nb_owners != l2->nb_owners) return 0;
+
+    int c = 0;
+
+    for(int i = 0; i < nb_owners; i++) {
+        for(int j = 0; j < nb_owners; j++)
+            if (l1->lock_owners[i].des == l2->lock_owners[j].des 
+                && l1->lock_owners[i].proc == l2->lock_owners[i].proc) 
+                c++;
     }
-    if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock;
 
-error_lock :
-    perror("pthread_mutex_lock in rl_remove_dead_owner");
-    return -1;
+    return c == nb_owners;
+}
 
-error_unlock :
-    perror("pthread_mutex_unlock in rl_remove_dead_owner");
-    return -1;
+/** Fonction auxiliaire récursive pour fusionner des verrous */
+void rl_merge_locks(rl_descriptor lfd, rl_lock *aux, rl_lock *aux_next) {
+    if (aux->next_lock == -1 || aux->next_lock == -2) return;
+
+    // On vérifie que aux et aux_next ont les mêmes propriétaires
+    // Si oui on procède à la fusion
+    if(same_owners_in_locks(aux, aux_next)) {
+        if (aux_next->len == 0) 
+            aux->len = 0;
+        else if(aux_next->starting_offset + aux_next->len > aux->starting_offset + aux->len)
+            aux->len = aux_next->starting_offset + aux_next->len - aux->starting_offset;
+        
+        // TODO : On supprime le verrou aux_next;
+        aux->next_lock = aux_next->next_lock;
+    }
+
+    rl_merge_locks(lfd, aux, lfd.f->lock_table + aux_next->next_lock);
+}
+
+/** 
+ * Fusionne les verrous d'un rl_descriptor
+ * 
+ * * Les verrous étant rangés par ordre de starting_offset on vérifie juste avec les prochains
+ * ! Faire attention à len == 0 qui veut dire jusqu'à la fin du fichier
+ */
+void rl_merge(rl_descriptor lfd, rl_lock *lock) {
+    if (lfd.f->first != -2) return;
+    if (lock->next_lock == -1 || lock->next_lock == -2) return;
+
+    rl_merge_locks(lfd, lock, lfd.f->lock_table + lock->next_lock);
+    rl_merge(lfd, lfd.f->lock_table + lock->next_lock);
+}
+
+/** Retire tous les verrous des prorpiétaires morts. */
+void rl_remove_dead_owner(rl_descriptor lfd, rl_lock *lock) {
+    if (lfd.f->first == -2) return;
+    if (lock->next_lock == -1 || lock->next_lock == -2) return;
+
+    int limit = lock->nb_owners;
+    for (int i = 0; i < limit; i ++){
+        // On vérifie si le processus propriétaire existe, s'il n'existe pas on retire ses verrous
+        if (kill(lock->lock_owners[i].proc, 0) == -1 && errno == ESRCH)
+            remove_owner_in_lock(lock, i, lock->lock_owners[i]);
+    }
+
+    rl_remove_dead_owner(lfd, lfd.f->lock_table + lock->next_lock);
 }
 
 //TODO: Ajouter un merge des verrou
@@ -655,19 +687,21 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
     owner o = {.proc = getpid(), .des = lfd.d};
 
     // Si y a des processus propriétaire de lck non vivants, on les enlève.
-    if (rl_remove_dead_owner(lfd) < 0) return -1;
+    if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock1;
+    rl_remove_dead_owner(lfd, lfd.f->lock_table + lfd.f->first);
+    if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock1;
 
     if(lck->l_type == F_UNLCK)
     {
         if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock2;
         int r = rl_unlock(lfd.f->lock_table, lfd.f->first, lck, o, lfd.f->first);
         if(r == -3) {
-            pthread_mutex_unlock(&lfd.f->mutex_list);
+            if(pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock2;
             return r;
         }
         if(r == -1) lfd.f->first = -2;
         else lfd.f->first = r;
-        pthread_mutex_unlock(&lfd.f->mutex_list);
+        if(pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock2;
 
         pthread_cond_signal(&lfd.f->cond_list);
 
@@ -699,22 +733,23 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                     pthread_mutex_unlock(&lfd.f->mutex_list);
                     //TODO: Changer le retour
                     return -3;
-                } else {
-                    // sinon je m ajoute à la liste 
-                    add_deadlock(o, *lck, lfd.f->shm);
-                }
-                // j enleve le lock
+                } 
+                // Sinon je m ajoute à la liste 
+                else add_deadlock(o, *lck, lfd.f->shm);
+                
+                // J'enleve le lock
                 pthread_mutex_unlock(&dlck->mutex);
 
                 pthread_cond_wait(&lfd.f->cond_list, &lfd.f->mutex_list);
-                //J enleve le lock mutex list, je prend le deadlock, et je reprend le lock
-                pthread_mutex_unlock(&lfd.f->mutex_list);
+                // J'enleve le lock mutex list, je prend le deadlock, et je reprend le lock
+                if(pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock2;
                 pthread_mutex_lock(&dlck->mutex);
                 pthread_mutex_lock(&lfd.f->mutex_list);
-                //je m enleve de la liste
+
+                // Je m'enleve de la liste
                 remove_deadlock(o);
             } else {
-                pthread_mutex_unlock(&lfd.f->mutex_list);
+                if(pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock2;
                 return r;
             }
 
@@ -736,22 +771,22 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                     pthread_mutex_unlock(&lfd.f->mutex_list);
                     //TODO: Changer le retour
                     return -3;
-                } else {
-                    // sinon je m ajoute à la liste 
-                    //printf("AJOUT DANS DLCK\n");
-                    add_deadlock(o, *lck, lfd.f->shm);
-                }
-                // j enleve le lock
+                } 
+                // Sinon je m ajoute à la liste 
+                else add_deadlock(o, *lck, lfd.f->shm);
+                
+                // J'enleve le lock
                 pthread_mutex_unlock(&dlck->mutex);
 
                 pthread_cond_wait(&lfd.f->cond_list, &lfd.f->mutex_list);
-                //J enleve le lock mutex list, je prend le deadlock, et je reprend le lock
+
+                // J'enleve le lock mutex list, je prend le deadlock, et je reprend le lock
                 pthread_mutex_unlock(&lfd.f->mutex_list);
                 pthread_mutex_lock(&dlck->mutex);
                 pthread_mutex_lock(&lfd.f->mutex_list);
-                //je m enleve de la liste
+
+                // Je m'enleve de la liste
                 remove_deadlock(o);
-                //printf("RM DANS DLCK\n");
             } else {
                 pthread_mutex_unlock(&lfd.f->mutex_list);
                 return r;
@@ -765,6 +800,14 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 
     return 0;
 
+error_lock1 :
+    perror("pthread_mutex_lock pour rl_remove_dead_owner");
+    return -1;
+
+error_unlock1 :
+    perror("pthread_mutex_unlock pour rl_remove_dead_owner");
+    return -1;
+
 error_lock2 :
     perror("pthread_mutex_lock de rl_fcntl");
     return -1;
@@ -774,6 +817,25 @@ error_unlock2 :
     return -1;
 }
 
+
+int dup_rec(rl_descriptor lfd, rl_lock *lock, pid_t pid, int newd) {
+    if (lock->next_lock == -1 || lock->next_lock == -2) return 0;
+
+    // On balaye tous les propriétaires des verrous du fichier en mémoire partagée
+    int limit = lock->nb_owners;
+    for (int i = 0; i < limit; i ++){
+        // si on a un propriétaire {pid, lfd.d} on ajoute {pid, newd} aux verrous
+        if (lock->lock_owners[i].des == lfd.d && lock->lock_owners[i].proc == pid){
+            owner lfd_owner = { .proc = pid, .des = newd };
+            if (lock->nb_owners == NB_OWNERS) return -1;
+
+            lock->lock_owners[lock->nb_owners] = lfd_owner;
+            lock->nb_owners ++;
+        }
+    }
+
+    return dup_rec(lfd, lfd.f->lock_table + lock->next_lock, pid, newd);
+}
 /**
  * Duplique un descripteur sur le plus petit descipteur non utilisé.
  * 
@@ -804,36 +866,8 @@ rl_descriptor rl_dup(rl_descriptor lfd)
     }
 
     // On duplique toutes les occurrences de lfd_owner comme propriétaire de verrou
-    // On le fait de manière itérative
-    rl_lock *aux = lfd.f->lock_table + lfd.f->first;
-
-
-    while (aux->next_lock != -1){
-        // On balaye tous les propriétaires des verrous du fichier en mémoire partagée
-        int limit = aux->nb_owners;
-        for (int i = 0; i < limit; i ++){
-            // si on a un propriétaire {pid, lfd.d} on ajoute {pid, newd} aux verrous
-            if (aux->lock_owners[i].des == lfd.d && aux->lock_owners[i].proc == pid){
-                owner lfd_owner = { .proc = pid, .des = newd };
-                if (aux->nb_owners == NB_OWNERS) goto error_nb_owners;
-
-                aux->lock_owners[aux->nb_owners] = lfd_owner;
-                aux->nb_owners ++;
-            }
-        }
-        aux = lfd.f->lock_table + aux->next_lock;
-    }
-    // On traite le dernier verrou
-    int limit = aux->nb_owners;
-    for (int i = 0; i < limit; i ++){
-        if (aux->lock_owners[i].des == lfd.d && aux->lock_owners[i].proc == pid){
-            owner lfd_owner = { .des = newd, .proc = pid };
-            if (aux->nb_owners == NB_OWNERS) goto error_nb_owners;
-
-            aux->lock_owners[aux->nb_owners] = lfd_owner;
-            aux->nb_owners ++;
-        }
-    }
+    // On le fait de manière récursive
+    if (dup_rec(lfd, lfd.f->lock_table + lfd.f->first, pid, newd) < 0) goto error_nb_owners;
 
     if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock;
 
@@ -857,6 +891,19 @@ error_lock :
 error_unlock :
     rl_descriptor error4 = {.d = -4, .f = NULL};
     return error4;
+}
+
+void dup2_rec(rl_descriptor lfd, rl_lock *lock, pid_t pid, int newd) {
+    if (lock->next_lock == -1 || lock->next_lock == -2) return;
+
+    // On balaye tous les propriétaires des verrous du fichier en mémoire partagée
+    int limit = lock->nb_owners;
+    for (int i = 0; i < limit; i ++){
+        // si on a un propriétaire {pid, lfd.d} on ajoute {pid, newd} aux verrous
+        if (lock->lock_owners[i].des == lfd.d && lock->lock_owners[i].proc == pid)
+            lock->lock_owners[i].des = newd;
+    }
+    dup2_rec(lfd, lfd.f->lock_table + lock->next_lock, pid, newd);
 }
 
 /**
@@ -887,25 +934,8 @@ rl_descriptor rl_dup2(rl_descriptor lfd, int newd){
         return new_rl_descriptor;
     }
     // On duplique toutes les occurrences de lfd_owner comme propriétaire de verrou
-    // On le fait de manière itérative
-    rl_lock *aux = lfd.f->lock_table + lfd.f->first;
-
-    while (aux->next_lock != -1){
-        // On balaye tous les propriétaires des verrous du fichier en mémoire partagée
-        int limit = aux->nb_owners;
-        for (int i = 0; i < limit; i ++){
-            // si on a un propriétaire {pid, lfd.d} on ajoute {pid, newd} aux verrous
-            if (aux->lock_owners[i].des == lfd.d && aux->lock_owners[i].proc == pid)
-                aux->lock_owners[i].des = newd;
-        }
-        aux = lfd.f->lock_table + aux->next_lock;
-    }
-    // On traite le dernier verrou
-    int limit = aux->nb_owners;
-    for (int i = 0; i < limit; i ++){
-        if (aux->lock_owners[i].des == lfd.d && aux->lock_owners[i].proc == pid)
-            aux->lock_owners[i].des = newd;
-    }
+    // On le fait de manière récursive
+    dup2_rec(lfd, lfd.f->lock_table + lfd.f->first, pid, newd);
 
     if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock;
 
@@ -924,6 +954,23 @@ error_lock :
 error_unlock :
     rl_descriptor error4 = {.d = -4, .f = NULL};
     return error4;
+}
+
+int fork_rec(rl_lock *lock, int i, pid_t ppid, pid_t pid) {
+    if (lock->next_lock == -1 || lock->next_lock == -2) return 0;
+
+    int limit = lock->nb_owners;
+    for (int i = 0; i < limit; i ++){
+        // si on a un propriétaire {ppid, d} on ajoute {pid, d} aux verrous
+        if (lock->lock_owners[i].proc == ppid){
+            if (lock->nb_owners == NB_OWNERS) return -2;
+            owner lfd_owner = { .proc = pid, .des = lock->lock_owners[i].des };
+            
+            lock->lock_owners[lock->nb_owners] = lfd_owner;
+            lock->nb_owners ++;
+        }
+    }
+    return fork_rec(all_file.tab_open_files[i]->lock_table + lock->next_lock, i, ppid, pid);
 }
 
 /**
@@ -954,37 +1001,8 @@ pid_t rl_fork(){
             if (pthread_mutex_unlock(l) < 0) return -4;
             continue;
         }
-
-        // aux est un verrou
-        rl_lock *aux = (all_file.tab_open_files[i]->lock_table) + (all_file.tab_open_files[i]->first);
         
-        while(aux->next_lock != -1){
-            // On balaye tous les propriétaires du verrou
-            int limit = aux->nb_owners;
-            for (int i = 0; i < limit; i ++){
-                // si on a un propriétaire {ppid, d} on ajoute {pid, d} aux verrous
-                if (aux->lock_owners[i].proc == ppid){
-                    if (aux->nb_owners == NB_OWNERS) return -2;
-                    owner lfd_owner = { .proc = pid, .des = aux->lock_owners[i].des };
-                    
-                    aux->lock_owners[aux->nb_owners] = lfd_owner;
-                    aux->nb_owners ++;
-                }
-            }
-            aux = all_file.tab_open_files[i]->lock_table + aux->next_lock;
-        }
-
-        // On traite le dernier verrou
-        int limit = aux->nb_owners;
-        for (int i = 0; i < limit; i ++){
-            if (aux->lock_owners[i].proc == ppid){
-                if (aux->nb_owners == NB_OWNERS) return -2;
-                owner lfd_owner = { .proc = pid, .des = aux->lock_owners[i].des };
-                
-                aux->lock_owners[aux->nb_owners] = lfd_owner;
-                aux->nb_owners ++;
-            }
-        }
+        if (fork_rec((all_file.tab_open_files[i]->lock_table) + (all_file.tab_open_files[i]->first), i, ppid, pid) < 0) return -3;
         if (pthread_mutex_unlock(l) < 0) return -4;
     }
 
@@ -1106,12 +1124,10 @@ int get_owner_lock(rl_lock *lock_table, int pos, struct flock *lck, owner o, own
 
 void add_deadlock(owner o, struct flock lck, char *shm)
 {
-    //printf("nb = %d ADD : %s\n", dlck->nb, shm);
     dlck->o[dlck->nb] = o;
     dlck->lck[dlck->nb] = lck;
     memset(dlck->shm[dlck->nb], 0, MAX_LEN_SHM);
     strncpy(dlck->shm[dlck->nb], shm, MAX_LEN_SHM);
-    //printf("FIN ADD : %s\n", dlck->shm[dlck->nb]);
     dlck->nb++;
 }
 
