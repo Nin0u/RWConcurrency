@@ -752,6 +752,7 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                 remove_deadlock(o);
             } else {
                 if(pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock2;
+                if(r == 0) rl_merge(lfd, lfd.f->lock_table + lfd.f->first);
                 return r;
             }
 
@@ -791,6 +792,7 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                 remove_deadlock(o);
             } else {
                 pthread_mutex_unlock(&lfd.f->mutex_list);
+                if(r == 0) rl_merge(lfd, lfd.f->lock_table + lfd.f->first);
                 return r;
             }
         }
@@ -798,8 +800,8 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 
     }
     pthread_mutex_unlock(&dlck->mutex);
+    rl_merge(lfd, lfd.f->lock_table + lfd.f->first);
     pthread_mutex_unlock(&lfd.f->mutex_list);
-
     return 0;
 
 error_lock1 :
