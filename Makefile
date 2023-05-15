@@ -9,11 +9,11 @@ INC=include/owner.h include/rl_lock.h include/rl_open_file.h include/rl_descript
 
 # Final Objects
 OBJECTS=obj/main.o obj/rl_library_lock.o
-TOBJECTS=obj/test1.o obj/test2.o obj/test3.o obj/test4.o obj/test5.o obj/test6.o
+TOBJECTS=obj/test1.o obj/test2.o obj/test3.o obj/test4.o obj/test5.o obj/test6.o obj/test7.o
 
 # Output files' names.
 TARGET=main
-TTARGET=test1 test2 test3 test4 test5 test6
+TTARGET=test1 test2 test3 test4 test5 test6 test7
 
 all: $(TARGET) test
 
@@ -40,6 +40,7 @@ test: $(TOBJECTS)
 	$(CC) -o test4 obj/test4.o obj/rl_library_lock.o
 	$(CC) -o test5 obj/test5.o obj/rl_library_lock.o
 	$(CC) -o test6 obj/test6.o obj/rl_library_lock.o
+	$(CC) -o test7 obj/test7.o obj/rl_library_lock.o
 
 obj/test1.o: src/test1.c include/rl_library_lock.h
 	$(OBJ_DIR)
@@ -62,5 +63,9 @@ obj/test5.o: src/test5.c include/rl_library_lock.h
 	$(CCO)
 
 obj/test6.o: src/test6.c include/rl_library_lock.h
+	$(OBJ_DIR)
+	$(CCO)
+
+obj/test7.o: src/test6.c include/rl_library_lock.h
 	$(OBJ_DIR)
 	$(CCO)
