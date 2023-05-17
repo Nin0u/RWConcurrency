@@ -19,6 +19,8 @@ typedef struct rl_open_file
 
     pthread_mutex_t mutex_list; //Utiliser lorsqu'on modifie la liste !
     pthread_cond_t cond_list;
+
+    int nb_des;
 } rl_open_file;
 
 

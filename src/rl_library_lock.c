@@ -91,7 +91,6 @@ int initialiser_cond(pthread_cond_t *pcond) {
 
 int rl_init_library()
 {
-    // ! Je sais pas trop pour le moment;
     all_file.nb_files = 0;
     return 0;
 }
@@ -152,9 +151,15 @@ static rl_open_file *open_shm(const char *path)
             return NULL;
         }
 
+        file->nb_des = 0;
+
         memset(file->shm, 0, 256);
         strncpy(file->shm, name, 256);
     }
+
+    pthread_mutex_lock(&file->mutex_list);
+    file->nb_des++;
+    pthread_mutex_unlock(&file->mutex_list);
 
     return file;
 }
@@ -252,33 +257,40 @@ static int rl_remove_owner(rl_lock *lock_table, int pos, owner o)
 int rl_close(rl_descriptor lfd)
 {
     if(close(lfd.d) == -1) return -1;
-    if(lfd.f->first == -2) return 0;
+    if(lfd.f->first != -2) {
+        //On vérouille car on va modifier la liste (potentiellement)
+        pthread_mutex_lock(&lfd.f->mutex_list);
 
-    //On vérouille car on va modifier la liste (potentiellement)
-    pthread_mutex_lock(&lfd.f->mutex_list);
-
-    owner o = {.proc = getpid(), .des = lfd.d};
-    lfd.f->first = rl_remove_owner(lfd.f->lock_table, lfd.f->first, o);
+        owner o = {.proc = getpid(), .des = lfd.d};
+        lfd.f->first = rl_remove_owner(lfd.f->lock_table, lfd.f->first, o);
 
 
-    // Cas si y a plus personne dans la liste (la fonction revoie -1 si c'est le cas)
-    if(lfd.f->first == -1) lfd.f->first = -2;
+        // Cas si y a plus personne dans la liste (la fonction revoie -1 si c'est le cas)
+        if(lfd.f->first == -1) lfd.f->first = -2;
 
-    pthread_mutex_unlock(&lfd.f->mutex_list);
+        pthread_mutex_unlock(&lfd.f->mutex_list);
 
-    // On réveille les processus attendant sur cond
-    pthread_cond_signal(&lfd.f->cond_list);
+        // On réveille les processus attendant sur cond
+        pthread_cond_signal(&lfd.f->cond_list);
 
-    for(int i = 0; i < all_file.nb_files; i++) {
-        if(all_file.tab_open_files[i] == lfd.f) {
-            close(all_file.fd_shm[i]);
-            for(int j = i; j < all_file.nb_files - 1; j++) {
-                all_file.tab_open_files[j] = all_file.tab_open_files[j + 1];
+        for(int i = 0; i < all_file.nb_files; i++) {
+            if(all_file.tab_open_files[i] == lfd.f) {
+                close(all_file.fd_shm[i]);
+                for(int j = i; j < all_file.nb_files - 1; j++) {
+                    all_file.tab_open_files[j] = all_file.tab_open_files[j + 1];
+                }
+                all_file.nb_files--;
+                break;
             }
-            all_file.nb_files--;
-            break;
         }
     }
+
+    pthread_mutex_lock(&lfd.f->mutex_list);
+    lfd.f->nb_des--;
+    if(lfd.f->nb_des == 0) {
+        shm_unlink(lfd.f->shm);
+    }
+    pthread_mutex_unlock(&lfd.f->mutex_list);
 
     return 0;
 }
