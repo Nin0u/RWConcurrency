@@ -684,7 +684,6 @@ void rl_remove_dead_owner(rl_descriptor lfd, rl_lock *lock) {
     rl_remove_dead_owner(lfd, lfd.f->lock_table + lock->next_lock);
 }
 
-//TODO: Ajouter un merge des verrou
 int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 {
     // Commande inconnue
@@ -734,13 +733,12 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                 // Je verifie
                 int verif = verif_lock(o, lck, lfd.f->shm, lfd.f->shm);
 
-
                 // Si pas bon je renvoie une erreur
                 if(!verif) {
                     pthread_mutex_unlock(&dlck->mutex);
                     pthread_mutex_unlock(&lfd.f->mutex_list);
-                    //TODO: Changer le retour ERRNO AFFICHER dans Test 5 6 7 le DEADLOCK
-                    return -3;
+                    errno = EDEADLK;
+                    return -1;
                 } 
                 // Sinon je m ajoute à la liste 
                 else add_deadlock(o, *lck, lfd.f->shm);
@@ -758,21 +756,20 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                 remove_deadlock(o);
             } else {
                 if(pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock2;
-                if(r == 0) {
-                    if(lfd.f->first != -2)
-                        rl_merge(lfd, lfd.f->lock_table + lfd.f->first);
-                }
+                if(r == 0) 
+                    rl_merge(lfd, lfd.f->lock_table + lfd.f->first);
                 return r;
             }
 
         } 
 
-         else 
+        else 
         {
             int r = rl_replace_lock(lfd, lck, pos, o);
 
             if(cmd == F_SETLKW) {
                 if(r != -2 && r != -3) break;
+                
                 // Je verifie
                 int verif = verif_lock(o, lck, lfd.f->shm, lfd.f->shm);
 
@@ -780,8 +777,8 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                 if(!verif) {
                     pthread_mutex_unlock(&dlck->mutex);
                     pthread_mutex_unlock(&lfd.f->mutex_list);
-                    //TODO: Changer le retour
-                    return -3;
+                    errno = EDEADLK;
+                    return -1;
                 } 
                 // Sinon je m ajoute à la liste 
                 else add_deadlock(o, *lck, lfd.f->shm);
@@ -800,10 +797,8 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                 remove_deadlock(o);
             } else {
                 pthread_mutex_unlock(&lfd.f->mutex_list);
-                if(r == 0) {
-                    if(lfd.f->first != -2)
-                        rl_merge(lfd, lfd.f->lock_table + lfd.f->first);
-                }
+                if(r == 0)
+                    rl_merge(lfd, lfd.f->lock_table + lfd.f->first);
                 return r;
             }
         }
@@ -811,8 +806,7 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 
     }
     pthread_mutex_unlock(&dlck->mutex);
-    if(lfd.f->first != -2)
-        rl_merge(lfd, lfd.f->lock_table + lfd.f->first);
+    rl_merge(lfd, lfd.f->lock_table + lfd.f->first);
     pthread_mutex_unlock(&lfd.f->mutex_list);
     return 0;
 
@@ -833,7 +827,7 @@ error_unlock2 :
     return -1;
 }
 
-
+/** Fonction auxiliaire recursive pour rl_dup */
 int dup_rec(rl_descriptor lfd, rl_lock *lock, pid_t pid, int newd) {
     if (lock->next_lock == -1 || lock->next_lock == -2) return 0;
 
@@ -852,6 +846,7 @@ int dup_rec(rl_descriptor lfd, rl_lock *lock, pid_t pid, int newd) {
 
     return dup_rec(lfd, lfd.f->lock_table + lock->next_lock, pid, newd);
 }
+
 /**
  * Duplique un descripteur sur le plus petit descipteur non utilisé.
  * 
@@ -909,6 +904,7 @@ error_unlock :
     return error4;
 }
 
+/** Fonction auxiliaire recursive pour rl_dup2 */
 void dup2_rec(rl_descriptor lfd, rl_lock *lock, pid_t pid, int newd) {
     if (lock->next_lock == -1 || lock->next_lock == -2) return;
 
@@ -972,6 +968,7 @@ error_unlock :
     return error4;
 }
 
+/** Fonction auxiliaire recursive pour rl_fork */
 int fork_rec(rl_lock *lock, int i, pid_t ppid, pid_t pid) {
     if (lock->next_lock == -1 || lock->next_lock == -2) return 0;
 
