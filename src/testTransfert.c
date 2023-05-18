@@ -16,15 +16,12 @@
 
 void transfert(rl_descriptor desc, int cred, int deb, long somme)
 {
-    printf("AVANT1 %d\n", getpid());
-    //rl_print_open_file(desc.f);
     struct flock f1;
     f1.l_start = cred * sizeof(long);
     f1.l_type = F_WRLCK;
     f1.l_whence = SEEK_CUR;
     f1.l_len = sizeof(long);
     rl_fcntl(desc, F_SETLKW, &f1);
-    printf("LOCK1 %d\n", deb);
 
     struct flock f2;
     f2.l_start = deb * sizeof(long);
@@ -33,7 +30,6 @@ void transfert(rl_descriptor desc, int cred, int deb, long somme)
     f2.l_len = sizeof(long);
 
     rl_fcntl(desc, F_SETLKW, &f2);
-    printf("LOCK2\n");
 
     long *soldes = mmap(0, LEN_TAB * sizeof(long), PROT_READ | PROT_WRITE, MAP_SHARED, desc.d, 0);
     if(soldes == MAP_FAILED) {
@@ -55,7 +51,7 @@ void transfert(rl_descriptor desc, int cred, int deb, long somme)
 
 int main()
 {
-    srand(time(NULL));
+    srand(getpid());
     int pere = 1;
 
     rl_descriptor desc = rl_open("compte", O_CREAT | O_RDWR | O_TRUNC, S_IRWXU | S_IRWXG);
@@ -71,11 +67,9 @@ int main()
             perror("write init");
             exit(1);
         }
-        printf("%ld\n", solde);
         sum += solde;
     }
 
-    printf("HERE\n");
     rl_close(desc);
     // Duplication du processus
     for(int i = 0; i < NB_PROC; i++) {
@@ -104,10 +98,7 @@ int main()
 
     if(pere) {
         int status;
-        while(wait(&status) != -1) {
-            printf("%d %d\n", WIFEXITED(status), WIFSIGNALED(status));
-        }
-        perror("wait");
+        while(wait(&status) != -1);
         long verif_sum = 0;
         lseek(desc.d, 0, SEEK_SET);
         for(int i = 0; i < LEN_TAB; i++) {

@@ -259,7 +259,6 @@ int rl_close(rl_descriptor lfd)
     if(close(lfd.d) == -1) return -1;
     pthread_mutex_lock(&lfd.f->mutex_list);
     if(lfd.f->first != -2) {
-        //printf("BLABLA\n");
         //On vérouille car on va modifier la liste (potentiellement)
 
         owner o = {.proc = getpid(), .des = lfd.d};
@@ -287,16 +286,6 @@ int rl_close(rl_descriptor lfd)
     } else {
         pthread_mutex_unlock(&lfd.f->mutex_list);
     }
-
-    //printf("AVANT CLOSE\n");
-
-    //pthread_mutex_lock(&lfd.f->mutex_list);
-    //printf("APRES CLOSE\n");
-    //lfd.f->nb_des--;
-    // if(lfd.f->nb_des == 0) {
-    //     shm_unlink(lfd.f->shm);
-    // }
-    //pthread_mutex_unlock(&lfd.f->mutex_list);
 
     return 0;
 }
@@ -470,8 +459,7 @@ static int rl_cut(rl_lock *lock_table, rl_lock *current, int cut_pos)
 {
     int old_len = current->len;
     current->len = (cut_pos - current->starting_offset);
-
-    printf("rl_cut at %d\n", cut_pos);
+    
     int i = 0;
     for(i = 0; i < NB_LOCKS; i++)
         if(lock_table[i].next_lock == -2) break;
@@ -529,8 +517,6 @@ static int rl_unlock(rl_lock *lock_table, int pos, struct flock *lck, owner o, i
     if(lck->l_start <= current->starting_offset && current->starting_offset + current->len <= lck->l_start + lck->l_len && is_in_lock(current, o))
     {
         remove_owner_in_lock(lock_table, pos, o);
-        printf("COUCOU %ld + d : %d PID : %d debut : %d fin : %d\n",current->nb_owners, o.des, o.proc, lck->l_start, lck->l_start + lck->l_len);
-        printf("current debut : %d end : %d\n", current->starting_offset, current->starting_offset + current->len);
 
         int next = rl_unlock(lock_table, current->next_lock, lck, o, first);
         if(next == -2 || next == -3) return -3;
@@ -577,13 +563,11 @@ static int rl_add_lock(rl_descriptor lfd, int cmd, struct flock *lck)
     // EAGAIN : Ressource temporairement non disponible
     if(pos == -3)
     {
-        printf("Overlap\n");
         errno = EAGAIN;
         return -3;
     }
     if(pos == -2)
     {
-        printf("No Place\n");
         errno = EAGAIN;
         return -2;
     }
@@ -709,17 +693,15 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
     owner o = {.proc = getpid(), .des = lfd.d};
 
     // Si y a des processus propriétaire de lck non vivants, on les enlève.
-    // printf("MUTEX LIST\n");
-    // if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock1;
-    // rl_remove_dead_owner(lfd, lfd.f->lock_table + lfd.f->first);
-    // if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock1;
+    if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock1;
+    if(lfd.f->first != -2)
+        rl_remove_dead_owner(lfd, lfd.f->lock_table + lfd.f->first);
+    if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock1;
     
-    // printf("MUTEX LIST DIN\n");
 
     if(lck->l_type == F_UNLCK)
     {
         if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock2;
-        printf("UNLOCK\n");
         int r = rl_unlock(lfd.f->lock_table, lfd.f->first, lck, o, lfd.f->first);
         if(r == -3) {
             if(pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock2;
@@ -727,10 +709,7 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
         }
         if(r == -1) lfd.f->first = -2;
         else lfd.f->first = r;
-        printf("UN : ");
-        rl_print_open_file(lfd.f);
         pthread_cond_broadcast(&lfd.f->cond_list);
-        printf("REVEILLE\n");
         if(pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock2;
 
 
@@ -738,11 +717,8 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
     }
 
     // Cas du cmd == F_SETLK ou F_SETLKW
-    printf("MUTEX DLCK %d\n", getpid());
     if(cmd == F_SETLKW) pthread_mutex_lock(&dlck->mutex);
-    printf("FIN MUTEX DLCK %d\n", getpid());
     if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock2;
-    printf("FIN MUTEX LIST %d\n", getpid());
     while(1) {
         int pos = -2;
         if(lfd.f->first != -2 )
@@ -752,7 +728,6 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
         if(pos == -2)
         {   
             int r = rl_add_lock(lfd, cmd, lck);
-                printf("AAAA %d\n", r);
             if(cmd == F_SETLKW) {
                 if(r != -2 && r != -3) break;
 
@@ -762,16 +737,13 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 
                 // Si pas bon je renvoie une erreur
                 if(!verif) {
-                    printf("DEADLOCK !\n");
                     pthread_mutex_unlock(&dlck->mutex);
                     pthread_mutex_unlock(&lfd.f->mutex_list);
-                    //TODO: Changer le retour
+                    //TODO: Changer le retour ERRNO AFFICHER dans Test 5 6 7 le DEADLOCK
                     return -3;
                 } 
                 // Sinon je m ajoute à la liste 
                 else add_deadlock(o, *lck, lfd.f->shm);
-
-                printf("SLEEP %d\n", getpid());
                 
                 // J'enleve le lock
                 pthread_mutex_unlock(&dlck->mutex);
@@ -786,7 +758,10 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                 remove_deadlock(o);
             } else {
                 if(pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock2;
-                //if(r == 0) rl_merge(lfd, lfd.f->lock_table + lfd.f->first);
+                if(r == 0) {
+                    if(lfd.f->first != -2)
+                        rl_merge(lfd, lfd.f->lock_table + lfd.f->first);
+                }
                 return r;
             }
 
@@ -794,11 +769,7 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 
          else 
         {
-            printf("REPLACE ! %d\n", getpid());
             int r = rl_replace_lock(lfd, lck, pos, o);
-            printf("REPLACE ! %d\n", r);
-            printf("RP : ");
-            rl_print_open_file(lfd.f);
 
             if(cmd == F_SETLKW) {
                 if(r != -2 && r != -3) break;
@@ -807,7 +778,6 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
 
                 // Si pas bon je renvoie une erreur
                 if(!verif) {
-                    printf("DEADLOCK !\n");
                     pthread_mutex_unlock(&dlck->mutex);
                     pthread_mutex_unlock(&lfd.f->mutex_list);
                     //TODO: Changer le retour
@@ -815,14 +785,11 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                 } 
                 // Sinon je m ajoute à la liste 
                 else add_deadlock(o, *lck, lfd.f->shm);
-                
-                printf("SLEEP %d\n", getpid());
 
                 // J'enleve le lock
                 pthread_mutex_unlock(&dlck->mutex);
 
                 pthread_cond_wait(&lfd.f->cond_list, &lfd.f->mutex_list);
-                printf("HAA %d\n", getpid());
 
                 // J'enleve le lock mutex list, je prend le deadlock, et je reprend le lock
                 pthread_mutex_unlock(&lfd.f->mutex_list);
@@ -833,16 +800,19 @@ int rl_fcntl(rl_descriptor lfd, int cmd, struct flock *lck)
                 remove_deadlock(o);
             } else {
                 pthread_mutex_unlock(&lfd.f->mutex_list);
-                //if(r == 0) rl_merge(lfd, lfd.f->lock_table + lfd.f->first);
+                if(r == 0) {
+                    if(lfd.f->first != -2)
+                        rl_merge(lfd, lfd.f->lock_table + lfd.f->first);
+                }
                 return r;
             }
         }
 
 
     }
-    printf("DEVEROUILLE %d\n", getpid());
     pthread_mutex_unlock(&dlck->mutex);
-    //rl_merge(lfd, lfd.f->lock_table + lfd.f->first);
+    if(lfd.f->first != -2)
+        rl_merge(lfd, lfd.f->lock_table + lfd.f->first);
     pthread_mutex_unlock(&lfd.f->mutex_list);
     return 0;
 
@@ -1195,7 +1165,6 @@ void remove_deadlock(owner o)
 int is_in_deadlock(owner o)
 {
     for(int i = 0; i < dlck->nb; i++) {
-        //printf(" - %d %d\n", dlck->o[i].proc, dlck->o[i].des);
         if(o.proc == dlck->o[i].proc) return i;
     }
     return -1;
@@ -1212,7 +1181,6 @@ rl_descriptor open_shm_dead(char *shm)
 {
     int fd = shm_open(shm, O_RDWR, S_IRWXU | S_IRWXG);
     if(fd == -1) {
-        printf("shm : %s\n", shm);
         perror("open shm dead");
         exit(1);
     }
@@ -1232,10 +1200,6 @@ int verif_lock(owner o, struct flock *lck, char *shm, char *shm_opened)
     owner pred_own[256];
     memset(pred_own, 0, sizeof(owner) * 256);
 
-    // printf("shm = %s\n", shm);
-    // printf("shm_opened = %s\n",shm_opened);
-    // printf("des : %d proc : %d\n", o.des, o.proc);
-
     rl_descriptor des = open_shm_dead(shm);
 
     rl_open_file *file = des.f;
@@ -1243,27 +1207,18 @@ int verif_lock(owner o, struct flock *lck, char *shm, char *shm_opened)
     if(a) {
         pthread_mutex_lock(&file->mutex_list);
     }
-    //printf("A : ");
-    //rl_print_open_file(file);
 
-    //printf("DEBUT\n");
     int nb = get_owner_lock(file->lock_table, file->first, lck, o, pred_own, 0);
-    //printf("FIN\n");
     if(a) {
         pthread_mutex_unlock(&file->mutex_list);
         close(des.d);
     }
 
-    // for(int i = 0; i < nb; i++) {
-    //     printf("(%d, %d) ", pred_own[i].des, pred_own[i].proc);
-    // }
-    // printf("\n");
 
     pid_t p = getpid();
     for(int i = 0; i < nb; i++) {
         if(pred_own[i].proc == p) return 0;
         int index = is_in_deadlock(pred_own[i]);
-        //printf("index = %d\n", index);
         if(index != -1) {
             int r = verif_lock(dlck->o[index], dlck->lck + index, dlck->shm[index], shm_opened);
             if(r == 0) return 0;
