@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -28,7 +29,8 @@ int main()
         f1.l_type = F_WRLCK;
         f1.l_whence = SEEK_SET;
         f1.l_len = 10;
-        rl_fcntl(desc1, F_SETLKW, &f1);
+        if (rl_fcntl(desc1, F_SETLKW, &f1) < 0 && errno == EDEADLK)
+            printf("DEADLOCK\n");
 
         printf("P1 Pose verrou sur F1\n");
 
@@ -45,7 +47,8 @@ int main()
         f2.l_len = 10;
 
         printf("P1 va poser verrou du F2, mais va bloquer\n");
-        rl_fcntl(desc2, F_SETLKW, &f2);
+        if (rl_fcntl(desc2, F_SETLKW, &f2) < 0 && errno == EDEADLK)
+            printf("DEADLOCK\n");
         
         rl_close(desc1);
         rl_close(desc2);
@@ -70,7 +73,8 @@ int main()
             f2.l_type = F_WRLCK;
             f2.l_whence = SEEK_SET;
             f2.l_len = 10;
-            rl_fcntl(desc2, F_SETLKW, &f2);
+            if (rl_fcntl(desc2, F_SETLKW, &f2) < 0 && errno == EDEADLK)
+                printf("DEADLOCK\n");
 
             printf("P2 Pose verrou sur F2\n");
 
@@ -86,7 +90,8 @@ int main()
             f3.l_whence = SEEK_SET;
             f3.l_len = 10;
             printf("P2 va poser un Verrou sur F3, mais va bloquer\n");        
-            rl_fcntl(desc3, F_SETLKW, &f3);
+            if (rl_fcntl(desc3, F_SETLKW, &f3) < 0 && errno == EDEADLK)
+                printf("DEADLOCK\n");
             
             rl_close(desc3);
             rl_close(desc2);
@@ -104,7 +109,8 @@ int main()
             f3.l_type = F_WRLCK;
             f3.l_whence = SEEK_SET;
             f3.l_len = 10;
-            rl_fcntl(desc3, F_SETLKW, &f3);
+            if (rl_fcntl(desc3, F_SETLKW, &f3) < 0 && errno == EDEADLK)
+                printf("DEADLOCK\n");
 
             printf("P3 Pose verrou sur F3\n");
 
@@ -120,7 +126,8 @@ int main()
             f1.l_whence = SEEK_SET;
             f1.l_len = 10;
             printf("P3 va poser un Verrou sur F1, mais va bloquer et DEADLOCK\n");        
-            rl_fcntl(desc1, F_SETLKW, &f1); 
+            if (rl_fcntl(desc1, F_SETLKW, &f1) < 0 && errno == EDEADLK)
+                printf("DEADLOCK\n");
 
             rl_close(desc3);
             rl_close(desc1);

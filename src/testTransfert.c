@@ -10,9 +10,9 @@
 
 #include "rl_library_lock.h"
 
-#define NB_PROC 100
+#define NB_PROC 10
 #define LEN_TAB 10
-#define NB_TRANS 1
+#define NB_TRANS 10
 
 void transfert(rl_descriptor desc, int cred, int deb, long somme)
 {
