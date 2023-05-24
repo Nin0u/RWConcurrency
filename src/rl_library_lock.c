@@ -18,6 +18,7 @@
 
 /** Variable globale statique qui contient tous nos fichiers ouverts. */
 static rl_all_file all_file;
+rl_descriptor error = {.d = -1, .f = NULL};
 
 
 /** DEADLOCK */
@@ -829,7 +830,7 @@ error_unlock2 :
 
 /** Fonction auxiliaire recursive pour rl_dup */
 int dup_rec(rl_descriptor lfd, rl_lock *lock, pid_t pid, int newd) {
-    if (lock->next_lock == -1 || lock->next_lock == -2) return 0;
+    if (lock->next_lock == -2) return 0;
 
     // On balaye tous les propriétaires des verrous du fichier en mémoire partagée
     int limit = lock->nb_owners;
@@ -844,7 +845,8 @@ int dup_rec(rl_descriptor lfd, rl_lock *lock, pid_t pid, int newd) {
         }
     }
 
-    return dup_rec(lfd, lfd.f->lock_table + lock->next_lock, pid, newd);
+    if(lock->next_lock != -1) return dup_rec(lfd, lfd.f->lock_table + lock->next_lock, pid, newd);
+    return 0;
 }
 
 /**
@@ -887,35 +889,21 @@ rl_descriptor rl_dup(rl_descriptor lfd)
 
 // Cas d'erreurs
 error_dup:
-    rl_descriptor error1 = {.d = -1, .f = NULL};
-    return error1;
+    error.d = -1;
+    return error;
 
 error_nb_owners:
     if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock;
-    rl_descriptor error2 = {.d = -2, .f = NULL};
-    return error2;
+    error.d = -2;
+    return error;
 
 error_lock :
-    rl_descriptor error3 = {.d = -3, .f = NULL};
-    return error3;
+    error.d = -3;
+    return error;
 
 error_unlock :
-    rl_descriptor error4 = {.d = -4, .f = NULL};
-    return error4;
-}
-
-/** Fonction auxiliaire recursive pour rl_dup2 */
-void dup2_rec(rl_descriptor lfd, rl_lock *lock, pid_t pid, int newd) {
-    if (lock->next_lock == -1 || lock->next_lock == -2) return;
-
-    // On balaye tous les propriétaires des verrous du fichier en mémoire partagée
-    int limit = lock->nb_owners;
-    for (int i = 0; i < limit; i ++){
-        // si on a un propriétaire {pid, lfd.d} on ajoute {pid, newd} aux verrous
-        if (lock->lock_owners[i].des == lfd.d && lock->lock_owners[i].proc == pid)
-            lock->lock_owners[i].des = newd;
-    }
-    dup2_rec(lfd, lfd.f->lock_table + lock->next_lock, pid, newd);
+    error.d = -4;
+    return error;
 }
 
 /**
@@ -932,22 +920,23 @@ void dup2_rec(rl_descriptor lfd, rl_lock *lock, pid_t pid, int newd) {
  * -4 : Le dévérouillage a échoué.
 */
 rl_descriptor rl_dup2(rl_descriptor lfd, int newd){
-    // On commence par dupliquer le descripteur
-    if (dup2(lfd.d, newd) < 0) goto error_dup;
+        // On commence par dupliquer le descripteur
+    int res = dup2(lfd.d, newd);
+    if (res < 0) goto error_dup;
 
     // On stocke le pid pour éviter trop d'appels à getpid
     int pid = getpid();
 
     rl_descriptor new_rl_descriptor = {.d = newd, .f = lfd.f};
-
     if (pthread_mutex_lock(&lfd.f->mutex_list) < 0) goto error_lock;
     if(lfd.f->first == -2) {
         pthread_mutex_unlock(&lfd.f->mutex_list);
         return new_rl_descriptor;
     }
+
     // On duplique toutes les occurrences de lfd_owner comme propriétaire de verrou
     // On le fait de manière récursive
-    dup2_rec(lfd, lfd.f->lock_table + lfd.f->first, pid, newd);
+    if (dup_rec(lfd, lfd.f->lock_table + lfd.f->first, pid, newd) < 0) goto error_nb_owners;
 
     if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock;
 
@@ -956,21 +945,26 @@ rl_descriptor rl_dup2(rl_descriptor lfd, int newd){
 
 // Cas d'erreurs
 error_dup:
-    rl_descriptor error1 = {.d = -1, .f = NULL};
-    return error1;
+    error.d = -1;
+    return error;
+
+error_nb_owners:
+    if (pthread_mutex_unlock(&lfd.f->mutex_list) < 0) goto error_unlock;
+    error.d = -2;
+    return error;
 
 error_lock :
-    rl_descriptor error3 = {.d = -3, .f = NULL};
-    return error3;
+    error.d = -3;
+    return error;
 
 error_unlock :
-    rl_descriptor error4 = {.d = -4, .f = NULL};
-    return error4;
+    error.d = -4;
+    return error;
 }
 
 /** Fonction auxiliaire recursive pour rl_fork */
 int fork_rec(rl_lock *lock, int i, pid_t ppid, pid_t pid) {
-    if (lock->next_lock == -1 || lock->next_lock == -2) return 0;
+    if (lock->next_lock == -2) return 0;
 
     int limit = lock->nb_owners;
     for (int i = 0; i < limit; i ++){
@@ -983,7 +977,9 @@ int fork_rec(rl_lock *lock, int i, pid_t ppid, pid_t pid) {
             lock->nb_owners ++;
         }
     }
-    return fork_rec(all_file.tab_open_files[i]->lock_table + lock->next_lock, i, ppid, pid);
+    if(lock->next_lock != -1)
+        return fork_rec(all_file.tab_open_files[i]->lock_table + lock->next_lock, i, ppid, pid);
+    return 0;
 }
 
 /**

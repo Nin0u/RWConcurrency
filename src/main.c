@@ -80,8 +80,8 @@ int main(void)
 
     printf("\n======= TEST CLOSE =======\n");
     printf("---- Avant close ----\n");
-    rl_print_open_file(desc.f);
     wait(NULL);
+    rl_print_open_file(desc.f);
 
     rl_close(d2);
     rl_close(d);

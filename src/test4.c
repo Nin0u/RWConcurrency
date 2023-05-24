@@ -33,8 +33,11 @@ int main()
     f2.l_whence = SEEK_SET;
     f2.l_len = 15;
     rl_fcntl(desc2, F_SETLKW, &f2);
+    perror("TEST :");
 
     printf("Création du second lock\n");
+    rl_print_open_file(desc1.f);
+
 
     rl_close(desc1);
     rl_close(desc2);

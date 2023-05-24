@@ -23,7 +23,7 @@ clean:
 
 #==== Main ====#
 main: $(OBJECTS)
-	$(CC) -o main $(OBJECTS)
+	$(CC) -o main $(OBJECTS) -pthread -lrt
 
 obj/main.o: src/main.c include/rl_library_lock.h
 	$(OBJ_DIR)
@@ -34,14 +34,14 @@ obj/rl_library_lock.o: src/rl_library_lock.c include/rl_library_lock.h $(INC)
 	$(CCO)
 #==== Test ====#
 test: $(TOBJECTS)
-	$(CC) -o test1 obj/test1.o obj/rl_library_lock.o
-	$(CC) -o test2 obj/test2.o obj/rl_library_lock.o
-	$(CC) -o test3 obj/test3.o obj/rl_library_lock.o
-	$(CC) -o test4 obj/test4.o obj/rl_library_lock.o
-	$(CC) -o test5 obj/test5.o obj/rl_library_lock.o
-	$(CC) -o test6 obj/test6.o obj/rl_library_lock.o
-	$(CC) -o test7 obj/test7.o obj/rl_library_lock.o
-	$(CC) -o testTransfert obj/testTransfert.o obj/rl_library_lock.o
+	$(CC) -o test1 obj/test1.o obj/rl_library_lock.o -pthread -lrt
+	$(CC) -o test2 obj/test2.o obj/rl_library_lock.o -pthread -lrt 
+	$(CC) -o test3 obj/test3.o obj/rl_library_lock.o -pthread -lrt
+	$(CC) -o test4 obj/test4.o obj/rl_library_lock.o -pthread -lrt
+	$(CC) -o test5 obj/test5.o obj/rl_library_lock.o -pthread -lrt
+	$(CC) -o test6 obj/test6.o obj/rl_library_lock.o -pthread -lrt
+	$(CC) -o test7 obj/test7.o obj/rl_library_lock.o -pthread -lrt
+	$(CC) -o testTransfert obj/testTransfert.o obj/rl_library_lock.o -pthread -lrt
 
 
 obj/test1.o: src/test1.c include/rl_library_lock.h
